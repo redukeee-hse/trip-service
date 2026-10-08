@@ -4,5 +4,6 @@
 
 # Сборка
 bin/
+/trip-service
 
 .DS_Store
