@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -10,8 +14,19 @@ import (
 )
 
 func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.CreateTripParams) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeInvalidRequest(w, r, "cannot read request body")
+		return
+	}
+
+	if err := checkRequiredFields(body); err != nil {
+		writeInvalidRequest(w, r, err.Error())
+		return
+	}
+
 	var req api.TripData
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		writeInvalidRequest(w, r, "invalid JSON body")
@@ -63,6 +78,33 @@ func (h *Handler) FinishTrip(w http.ResponseWriter, r *http.Request, tripId api.
 		return
 	}
 	writeJSON(w, http.StatusOK, toAPITrip(trip))
+}
+
+func checkRequiredFields(body []byte) error {
+	top, err := requireKeys(body, "user_id", "driver_id", "start_point", "end_point", "price")
+	if err != nil {
+		return err
+	}
+	for _, point := range []string{"start_point", "end_point"} {
+		if _, err := requireKeys(top[point], "latitude", "longitude"); err != nil {
+			return fmt.Errorf("%s: %w", point, err)
+		}
+	}
+	return nil
+}
+
+func requireKeys(raw json.RawMessage, keys ...string) (map[string]json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return nil, errors.New("expected a JSON object")
+	}
+	for _, key := range keys {
+		value, ok := obj[key]
+		if !ok || string(value) == "null" {
+			return nil, fmt.Errorf("field %q is required", key)
+		}
+	}
+	return obj, nil
 }
 
 func validPoint(c api.Coordinates) bool {
