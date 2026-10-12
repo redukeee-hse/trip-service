@@ -37,6 +37,8 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, r, http.StatusConflict, "driver_busy", "Driver busy", "Driver already has an active trip")
 	case errors.Is(err, model.ErrTripCompleted):
 		writeProblem(w, r, http.StatusConflict, "trip_completed", "Trip completed", "Trip is already completed")
+	case errors.Is(err, model.ErrIdempotencyConflict):
+		writeProblem(w, r, http.StatusConflict, "idempotency_conflict", "Idempotency conflict", "Idempotency-Key was already used with a different request body")
 	default:
 		log.Printf("внутренняя ошибка %s %s: %v", r.Method, r.URL.Path, err)
 		writeProblem(w, r, http.StatusInternalServerError, "internal_error", "Internal error", "Internal server error")

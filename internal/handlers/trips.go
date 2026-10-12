@@ -13,7 +13,7 @@ import (
 	"github.com/redukeee-hse/avitoService/internal/model"
 )
 
-func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.CreateTripParams) {
+func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.CreateTripParams) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeInvalidRequest(w, r, "cannot read request body")
@@ -46,20 +46,24 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.Creat
 		return
 	}
 
-	trip, err := h.Service.CreateTrip(r.Context(), model.Trip{
+	trip, created, err := h.Service.CreateTrip(r.Context(), model.Trip{
 		UserID:     req.UserId,
 		DriverID:   req.DriverId,
 		StartPoint: model.Coordinates{Latitude: req.StartPoint.Latitude, Longitude: req.StartPoint.Longitude},
 		EndPoint:   model.Coordinates{Latitude: req.EndPoint.Latitude, Longitude: req.EndPoint.Longitude},
 		Price:      req.Price,
-	})
+	}, params.IdempotencyKey)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
 	w.Header().Set("Location", "/api/v1/trips/"+trip.ID.String())
-	writeJSON(w, http.StatusCreated, toAPITrip(trip))
+	writeJSON(w, status, toAPITrip(trip))
 }
 
 func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, tripId api.TripId) {

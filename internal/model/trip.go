@@ -16,6 +16,8 @@ var (
 	ErrTripNotFound  = errors.New("поездка не найдена")
 	ErrDriverBusy    = errors.New("у водителя уже есть активная поездка")
 	ErrTripCompleted = errors.New("поездка уже завершена")
+
+	ErrIdempotencyConflict = errors.New("ключ идемпотентности уже использован с другим телом запроса")
 )
 
 type Coordinates struct {

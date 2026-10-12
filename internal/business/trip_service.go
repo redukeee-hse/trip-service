@@ -2,12 +2,16 @@ package business
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/redukeee-hse/avitoService/internal/database"
 	"github.com/redukeee-hse/avitoService/internal/model"
 )
+
+// Cколько живёт Idempotency-Key.
+const idempotencyKeyTTL = 24 * time.Hour
 
 type TxManager interface {
 	Do(ctx context.Context, fn func(ctx context.Context) error) error
@@ -22,22 +26,74 @@ func NewTripService(tx TxManager, repo *database.TripRepository) *TripService {
 	return &TripService{tx: tx, repo: repo}
 }
 
-func (s *TripService) CreateTrip(ctx context.Context, trip model.Trip) (model.Trip, error) {
+func (s *TripService) CreateTrip(ctx context.Context, trip model.Trip, idempotencyKey *uuid.UUID) (model.Trip, bool, error) {
 	trip.ID = uuid.New()
 	trip.Status = model.StatusActive
 	trip.StartedAt = time.Now().UTC().Truncate(time.Microsecond)
 	trip.FinishedAt = nil
 
+	result := trip
+	created := true
+
 	err := s.tx.Do(ctx, func(ctx context.Context) error {
+		if idempotencyKey != nil {
+			existing, replayed, err := s.claimKey(ctx, *idempotencyKey, trip)
+			if err != nil {
+				return err
+			}
+			if replayed {
+				result = existing
+				created = false
+				return nil
+			}
+		}
+
 		if err := s.repo.Create(ctx, trip); err != nil {
 			return err
 		}
 		return s.repo.AddStatusHistory(ctx, trip.ID, nil, model.StatusActive)
 	})
 	if err != nil {
-		return model.Trip{}, err
+		return model.Trip{}, false, err
 	}
-	return trip, nil
+	return result, created, nil
+}
+
+// claimKey занимает ключ за новой поездкой. Если ключ уже занят, возвращает ранее
+// созданную поездку (replayed = true) или ErrIdempotencyConflict, если данные другие.
+func (s *TripService) claimKey(ctx context.Context, key uuid.UUID, trip model.Trip) (model.Trip, bool, error) {
+	data := requestData(trip)
+	claimed, err := s.repo.ClaimIdempotencyKey(ctx, key, data, trip.ID, idempotencyKeyTTL)
+	if err != nil {
+		return model.Trip{}, false, err
+	}
+	if claimed {
+		return model.Trip{}, false, nil
+	}
+
+	storedData, tripID, err := s.repo.GetIdempotencyKey(ctx, key)
+	if err != nil {
+		return model.Trip{}, false, err
+	}
+	if storedData != data {
+		return model.Trip{}, false, model.ErrIdempotencyConflict
+	}
+
+	existing, err := s.repo.GetByID(ctx, tripID)
+	if err != nil {
+		return model.Trip{}, false, err
+	}
+	return existing, true, nil
+}
+
+// requestData — данные запроса одной строкой, чтобы сравнить повтор с первым запросом.
+func requestData(t model.Trip) string {
+	return fmt.Sprintf("%s|%s|%v|%v|%v|%v|%d",
+		t.UserID, t.DriverID,
+		t.StartPoint.Latitude, t.StartPoint.Longitude,
+		t.EndPoint.Latitude, t.EndPoint.Longitude,
+		t.Price,
+	)
 }
 
 func (s *TripService) GetTrip(ctx context.Context, id uuid.UUID) (model.Trip, error) {
