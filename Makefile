@@ -4,7 +4,7 @@ export
 MIGRATIONS_DIR := migrations
 GOOSE := go tool goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)"
 
-.PHONY: generate run migrate migrate-down migrate-status db
+.PHONY: generate run migrate migrate-down migrate-status db docker-build docker-run
 
 generate:
 	go tool oapi-codegen \
@@ -28,3 +28,9 @@ migrate-status:
 
 db:
 	@psql "$(DATABASE_URL)"
+
+docker-build:
+	docker build -f deploy/Dockerfile -t trip-service:local .
+
+docker-run:
+	docker run --rm --network host --env-file .env trip-service:local

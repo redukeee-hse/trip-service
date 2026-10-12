@@ -36,6 +36,30 @@ make run                       # собрать и запустить серви
 | `make migrate-down` | откатывает все миграции |
 | `make migrate-status` | показывает, какие миграции применены |
 | `make db` | открывает `psql` к базе из `DATABASE_URL` |
+| `make docker-build` | собирает Docker-образ `trip-service:local` |
+| `make docker-run` | запускает образ рядом с PostgreSQL из `tripgoctl` |
+
+## Docker
+
+```bash
+tripgoctl environment start
+make migrate
+make docker-build
+make docker-run
+curl localhost:8080/ready
+```
+
+`deploy/Dockerfile` — многостадийная сборка. Первая стадия (`golang:1.26`)
+собирает бинарь, во вторую (`gcr.io/distroless/static-debian12:nonroot`)
+копируется только он: в итоговом образе нет исходников, Go и кеша сборки.
+Бинарь собран с `CGO_ENABLED=0`, поэтому ему не нужна libc. Процесс работает
+от пользователя `nonroot` (UID 65532), не от root. `.dockerignore` не пускает в
+сборку `.git`, `.env`, тесты и локальные файлы.
+
+**Размер итогового образа: 17.9 MB.**
+
+Контейнер запускается с `--network host`, чтобы достучаться до PostgreSQL,
+который `tripgoctl` пробрасывает на `localhost`. Переменные берутся из `.env`.
 
 ## Переменные окружения
 
@@ -93,6 +117,7 @@ internal/database/       пул, TxManager, репозиторий поездо�
 internal/model/          модель поездки и доменные ошибки
 migrations/              миграции goose
 contracts/               копия контрактов курса
+deploy/                  Dockerfile
 ```
 
 ## Решения
