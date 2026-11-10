@@ -7,3 +7,4 @@ bin/
 /trip-service
 
 .DS_Store
+coverage.out
