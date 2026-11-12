@@ -3,113 +3,81 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/joho/godotenv"
-	"github.com/redukeee-hse/avitoService/internal/business"
+
 	"github.com/redukeee-hse/avitoService/internal/config"
-	"github.com/redukeee-hse/avitoService/internal/database"
-	api "github.com/redukeee-hse/avitoService/internal/generated"
-	"github.com/redukeee-hse/avitoService/internal/handlers"
+	"github.com/redukeee-hse/avitoService/internal/container"
 )
 
+// main читает конфиг, собирает контейнер, запускает сервер и ждёт сигнала.
+// Сам ничего не создаёт: все зависимости — в internal/container.
 func main() {
-	if err := godotenv.Load(); err != nil {
-		fmt.Println("Ошибка скачивания .env файлов:", err)
+	if err := run(); err != nil {
+		// Контейнер мог не собраться (битый конфиг, нет БД), и его логгера
+		// ещё нет. Для последней записи хватает JSON в stderr.
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("service stopped", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
+}
 
-	ctx := context.Background()
-	interruptCtx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
-	defer stop()
-	router := chi.NewRouter()
+// run вынесен из main, чтобы defer отрабатывали до os.Exit.
+func run() error {
+	// .env нужен только локально; в контейнере переменные приходят из окружения.
+	envErr := godotenv.Load()
 
 	cfg, err := config.LoadConfig()
-
 	if err != nil {
-		log.Fatal("Ошибка конфига:", err)
+		return err
 	}
 
-	pool, err := database.NewPool(ctx, cfg.DB)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	c, err := container.New(ctx, cfg)
 	if err != nil {
-		log.Fatal("Ошибка создания пула:", err)
+		return err
 	}
-
-	databaseConnectCtx, stopDatabaseCtx := context.WithTimeout(ctx, cfg.DB.ConnectTimeout)
-	err = pool.Ping(databaseConnectCtx)
-	stopDatabaseCtx()
-	if err != nil {
-		log.Fatalf("Не удалось подключиться к базе данных: %v", err)
-	}
-
-	repo := database.NewTripRepository(pool, cfg.DB.QueryTimeout)
-	txManager := database.NewTxManager(pool)
-	service := business.NewTripService(txManager, repo)
-
-	handler := handlers.Handler{
-		Pool:        pool,
-		PingTimeout: cfg.PingTimeout,
-		Service:     service,
-	}
-
-	var _ api.ServerInterface = (*handlers.Handler)(nil)
-
-	api.HandlerWithOptions(&handler, api.ChiServerOptions{
-		BaseRouter:       router,
-		ErrorHandlerFunc: handlers.InvalidParamHandler,
-	})
-
-	server := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           router,
-		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-		ReadTimeout:       cfg.ReadTimeout,
-		WriteTimeout:      cfg.WriteTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
-	}
-
-	serversErr := make(chan error, 1)
-	go func() {
-		log.Printf("Запускаю сервер на %s", cfg.Addr)
-		serversErr <- server.ListenAndServe()
+	log := c.Logger
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if err := c.Close(closeCtx); err != nil {
+			log.Warn("resources closed with error", slog.String("error", err.Error()))
+		}
 	}()
 
-	exitCode := 0
+	if envErr != nil {
+		log.Debug(".env not loaded", slog.String("error", envErr.Error()))
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Info("server started", slog.String("addr", cfg.Addr))
+		serverErr <- c.Server.ListenAndServe()
+	}()
+
 	select {
-	case <-interruptCtx.Done():
-		log.Println("Пришел запрос на остановку сервера(SIGINT, SIGTERM)")
-		log.Println("Начинаю закрытие сервера")
-	case err = <-serversErr:
-		if errors.Is(err, http.ErrServerClosed) {
-			log.Println("Остановка сервера")
-		} else {
-			log.Printf("Ошибка сервера: %v", err)
-			exitCode = 1
+	case <-ctx.Done():
+		log.Info("shutdown signal received")
+	case err := <-serverErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, cfg.ShutdownTimeout)
+	// Контекст сигнала уже отменён — для Shutdown нужен свой, с таймаутом.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-	err = server.Shutdown(shutdownCtx)
-	if err != nil {
-		log.Printf("Ошибка закрытия сервера: %v - Закрываю сервер принудительно", err)
-		err := server.Close()
-		if err != nil {
-			log.Printf("Внутренняя ошибка: %v", err)
-		}
+	if err := c.Server.Shutdown(shutdownCtx); err != nil {
+		log.Warn("graceful shutdown timed out, closing forcibly", slog.String("error", err.Error()))
+		return errors.Join(err, c.Server.Close())
 	}
-	log.Println("Сервер остановлен")
-
-	pool.Close()
-	log.Println("Пул закрыт")
-
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
-
+	log.Info("server stopped")
+	return nil
 }
