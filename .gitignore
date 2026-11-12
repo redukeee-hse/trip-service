@@ -8,3 +8,6 @@ bin/
 
 .DS_Store
 coverage.out
+
+# Отчёт go-mutesting (make mutation)
+report.json

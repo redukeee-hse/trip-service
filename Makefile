@@ -4,7 +4,7 @@ export
 MIGRATIONS_DIR := migrations
 GOOSE := go tool goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)"
 
-.PHONY: generate run migrate migrate-down migrate-status db docker-build docker-run test test-integration lint
+.PHONY: generate run migrate migrate-down migrate-status db docker-build docker-run test test-integration lint mutation
 
 generate:
 	go tool oapi-codegen \
@@ -56,3 +56,22 @@ lint:
 # (нужен запущенный Docker), миграции накатываются из migrations/.
 test-integration:
 	go test -tags=integration -race -count=2 ./internal/repository/...
+
+# Мутационное тестирование domain и usecase (задание со звёздочкой ЛР2).
+# gremlins меняет условия и арифметику, go-mutesting ещё и удаляет инструкции.
+# Инструменты ставятся в bin/ с зафиксированными версиями.
+GREMLINS := $(CURDIR)/bin/gremlins
+GO_MUTESTING := $(CURDIR)/bin/go-mutesting
+GREMLINS_FLAGS := --invert-logical --invert-assignments --invert-bitwise --invert-bwassign \
+	--invert-loopctrl --remove-self-assignments --workers 2 --timeout-coefficient 10
+
+$(GREMLINS):
+	GOBIN=$(CURDIR)/bin go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+
+$(GO_MUTESTING):
+	GOBIN=$(CURDIR)/bin go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@v0.0.0-20261002081621-9ce5f731e321
+
+mutation: $(GREMLINS) $(GO_MUTESTING)
+	$(GREMLINS) unleash $(GREMLINS_FLAGS) ./internal/domain
+	$(GREMLINS) unleash $(GREMLINS_FLAGS) ./internal/usecase
+	$(GO_MUTESTING) --exec-timeout=60 ./internal/domain/... ./internal/usecase/... 2>/dev/null | grep -E '^FAIL|mutation score'
