@@ -34,20 +34,25 @@ func New(
 // Cколько живёт Idempotency-Key.
 const idempotencyKeyTTL = 24 * time.Hour
 
-func (u *Usecase) Execute(ctx context.Context, t trip.Trip, idempotencyKey *uuid.UUID) (trip.Trip, bool, error) {
-	if err := t.Validate(); err != nil {
+// Execute создаёт поездку. Из in берутся только данные клиента (пользователь,
+// водитель, точки, цена); id, статус и время начала задаёт сервер через
+// конструктор trip.New, даже если клиент прислал свои.
+func (u *Usecase) Execute(ctx context.Context, in trip.Trip, idempotencyKey *uuid.UUID) (trip.Trip, bool, error) {
+	t, err := trip.New(
+		uuid.New(),
+		in.UserID, in.DriverID,
+		in.StartPoint, in.EndPoint,
+		in.Price,
+		u.now().UTC().Truncate(time.Microsecond),
+	)
+	if err != nil {
 		return trip.Trip{}, false, err
 	}
-
-	t.ID = uuid.New()
-	t.Status = trip.StatusActive
-	t.StartedAt = u.now().UTC().Truncate(time.Microsecond)
-	t.FinishedAt = nil
 
 	result := t
 	created := true
 
-	err := u.tx.Do(ctx, func(ctx context.Context) error {
+	err = u.tx.Do(ctx, func(ctx context.Context) error {
 		if idempotencyKey != nil {
 			existing, replayed, err := u.claimKey(ctx, *idempotencyKey, t)
 			if err != nil {

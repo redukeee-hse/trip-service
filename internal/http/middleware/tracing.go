@@ -26,16 +26,26 @@ func Tracing(tp trace.TracerProvider, propagator propagation.TextMapPropagator, 
 		withRoute := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			span := trace.SpanFromContext(r.Context())
 			span.SetAttributes(attribute.String("http.route", findRoute(routes, r)))
-			// Recover стоит снаружи и поймает панику уже после того, как спан
-			// закрыт. Поэтому помечаем спан здесь и пробрасываем панику дальше.
+			// Recover стоит снаружи и спана не видит — оставляем ему ctx со
+			// спаном, чтобы запись panic recovered получила trace_id.
+			rememberTraceContext(r.Context())
+
+			// Панику не перехватываем: если next.ServeHTTP не вернулся
+			// нормально, completed останется false. Этот defer выполнится до
+			// span.End (otelhttp закрывает спан в своём defer снаружи), и спан
+			// уйдёт в Jaeger уже с ошибкой.
+			completed := false
 			defer func() {
-				if p := recover(); p != nil {
+				if !completed {
 					span.SetStatus(codes.Error, "panic")
-					span.SetAttributes(attribute.String("error.type", "panic"))
-					panic(p)
+					span.SetAttributes(
+						attribute.String("error.type", "panic"),
+						attribute.Int("http.response.status_code", http.StatusInternalServerError),
+					)
 				}
 			}()
 			next.ServeHTTP(w, r)
+			completed = true
 		})
 		return otelhttp.NewHandler(withRoute, "http.server",
 			otelhttp.WithTracerProvider(tp),

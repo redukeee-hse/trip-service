@@ -13,9 +13,10 @@ import (
 
 // NewLogger возвращает JSON-логгер с полем service в каждой записи.
 //
-// Если запись сделана внутри спана (через методы *Context: InfoContext,
-// ErrorContext, LogAttrs), в неё добавляются trace_id и span_id: по ним
-// запись в логе находится в Jaeger и наоборот.
+// В каждой записи есть trace_id и span_id. Если запись сделана внутри спана
+// (через методы *Context: InfoContext, ErrorContext, LogAttrs), это его
+// идентификаторы — по ним запись в логе находится в Jaeger и наоборот;
+// вне спана поля пустые.
 func NewLogger(w io.Writer, level slog.Level, service string) *slog.Logger {
 	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
 	return slog.New(traceHandler{base: handler}).With(slog.String("service", service))
@@ -37,13 +38,18 @@ func (h traceHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h traceHandler) Handle(ctx context.Context, r slog.Record) error {
-	handler := h.base
+	// По conventions trace_id и span_id есть в каждой записи. Вне спана
+	// (старт и остановка сервиса, ошибки экспорта телеметрии) они пустые:
+	// запись по-прежнему разбирается одной схемой, а пустое значение явно
+	// говорит, что запрос тут ни при чём.
+	traceID, spanID := "", ""
 	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		handler = handler.WithAttrs([]slog.Attr{
-			slog.String("trace_id", sc.TraceID().String()),
-			slog.String("span_id", sc.SpanID().String()),
-		})
+		traceID, spanID = sc.TraceID().String(), sc.SpanID().String()
 	}
+	handler := h.base.WithAttrs([]slog.Attr{
+		slog.String("trace_id", traceID),
+		slog.String("span_id", spanID),
+	})
 	for _, apply := range h.chain {
 		handler = apply(handler)
 	}

@@ -3,6 +3,7 @@ package transaction
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -20,6 +21,10 @@ var (
 	_ Executor = (*pgxpool.Pool)(nil)
 	_ Executor = pgx.Tx(nil)
 )
+
+// rollbackTimeout — сколько ждём ROLLBACK. Откат — одна короткая команда,
+// поэтому несколько секунд хватает с запасом; дольше — значит БД недоступна.
+const rollbackTimeout = 5 * time.Second
 
 type txKey struct{}
 
@@ -55,9 +60,15 @@ func (m *Manager) Do(ctx context.Context, fn func(ctx context.Context) error) er
 	}
 
 	// Rollback после успешного Commit вернёт pgx.ErrTxClosed — это ожидаемо.
-	// WithoutCancel: откат должен дойти до базы, даже если ctx запроса уже отменён.
 	defer func() {
-		_ = tx.Rollback(context.WithoutCancel(ctx))
+		// WithoutCancel: откат должен дойти до базы, даже если клиент уже
+		// оборвал запрос и ctx отменён. При этом значения ctx (спан трейса)
+		// сохраняются, и ROLLBACK попадает в трейс запроса — context.Background
+		// это потерял бы. WithTimeout поверх: WithoutCancel снимает и deadline,
+		// и без своего срока откат при зависшей БД ждал бы вечно.
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
 	}()
 
 	txCtx := context.WithValue(ctx, txKey{}, tx)

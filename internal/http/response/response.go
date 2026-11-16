@@ -19,8 +19,9 @@ import (
 func JSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	// Статус уже отправлен, исправить ответ нельзя. Обрыв соединения увидит
-	// middleware логирования, поэтому ошибку записи здесь не обрабатываем.
+	// Статус уже отправлен, исправить ответ нельзя. Ошибку записи (обычно
+	// клиент оборвал соединение) запоминает обёртка ResponseWriter в
+	// middleware, и она попадает в запись "request handled".
 	_ = json.NewEncoder(w).Encode(v)
 }
 
@@ -53,5 +54,6 @@ func writeProblem(w http.ResponseWriter, r *http.Request, status int, body api.P
 
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
+	// Ошибку записи, как и в JSON, запоминает обёртка в middleware.
 	_ = json.NewEncoder(w).Encode(body)
 }

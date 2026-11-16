@@ -156,3 +156,43 @@ func assertTimePtr(t *testing.T, got, want *time.Time) {
 		t.Errorf("finished_at = %v, want %v", *got, *want)
 	}
 }
+
+func TestNew(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.New()
+	startedAt := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	v := validTrip()
+
+	got, err := trip.New(id, v.UserID, v.DriverID, v.StartPoint, v.EndPoint, v.Price, startedAt)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	want := v
+	want.ID = id
+	want.StartedAt = startedAt
+	// Новая поездка всегда активна и не завершена — это задаёт конструктор.
+	want.Status = trip.StatusActive
+	want.FinishedAt = nil
+	if got != want {
+		t.Errorf("New() = %+v, want %+v", got, want)
+	}
+}
+
+// Конструктор не создаёт поездку, нарушающую правила модели: возвращает
+// ValidationError и пустую поездку, а не наполовину заполненную.
+func TestNew_Invalid(t *testing.T) {
+	t.Parallel()
+
+	v := validTrip()
+	got, err := trip.New(uuid.New(), v.UserID, uuid.Nil, v.StartPoint, v.EndPoint, v.Price, time.Now())
+
+	var vErr *trip.ValidationError
+	if !errors.As(err, &vErr) || vErr.Field != "driver_id" {
+		t.Fatalf("err = %v, want ValidationError по driver_id", err)
+	}
+	if got != (trip.Trip{}) {
+		t.Errorf("при ошибке ожидалась пустая поездка, got %+v", got)
+	}
+}

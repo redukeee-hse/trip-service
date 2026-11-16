@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -44,13 +45,6 @@ func run() error {
 		return err
 	}
 	log := c.Logger
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-		if err := c.Close(closeCtx); err != nil {
-			log.Warn("resources closed with error", slog.String("error", err.Error()))
-		}
-	}()
 
 	if envErr != nil {
 		log.Debug(".env not loaded", slog.String("error", envErr.Error()))
@@ -62,22 +56,40 @@ func run() error {
 		serverErr <- c.Server.ListenAndServe()
 	}()
 
+	var runErr error
 	select {
 	case <-ctx.Done():
 		log.Info("shutdown signal received")
 	case err := <-serverErr:
 		if !errors.Is(err, http.ErrServerClosed) {
-			return err
+			runErr = err
 		}
 	}
 
-	// Контекст сигнала уже отменён — для Shutdown нужен свой, с таймаутом.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	return errors.Join(runErr, shutdown(c, cfg.ShutdownTimeout))
+}
+
+// shutdown останавливает сервис в пределах одного общего бюджета
+// SHUTDOWN_TIMEOUT: сначала HTTP-сервер дожидается текущих запросов, затем
+// закрываются пул и телеметрия — на сколько времени осталось.
+//
+// Контекст создаётся здесь, в момент остановки, а не при старте: иначе
+// таймер шёл бы с запуска сервиса и к сигналу уже истёк. И от контекста
+// сигнала он не наследуется — тот к этому моменту уже отменён.
+func shutdown(c *container.Container, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := c.Server.Shutdown(shutdownCtx); err != nil {
-		log.Warn("graceful shutdown timed out, closing forcibly", slog.String("error", err.Error()))
-		return errors.Join(err, c.Server.Close())
+
+	var errs []error
+	if err := c.Server.Shutdown(ctx); err != nil {
+		c.Logger.Warn("graceful shutdown timed out, closing forcibly", slog.String("error", err.Error()))
+		errs = append(errs, err, c.Server.Close())
 	}
-	log.Info("server stopped")
-	return nil
+	// Ресурсы закрываются после сервера: иначе незавершённые запросы
+	// остались бы без соединений с БД.
+	if err := c.Close(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	c.Logger.Info("server stopped")
+	return errors.Join(errs...)
 }

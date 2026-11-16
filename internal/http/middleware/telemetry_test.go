@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -275,5 +277,101 @@ func TestMetrics_ActiveRequestsAfterPanic(t *testing.T) {
 		if dp.Value != 0 {
 			t.Errorf("active_requests = %d после паники, want 0", dp.Value)
 		}
+	}
+}
+
+// traceJSONHandler — JSON-лог с trace_id из ctx, как у логгера сервиса
+// (infra/telemetry; импортировать его из http не даёт depguard).
+type traceJSONHandler struct{ slog.Handler }
+
+func (h traceJSONHandler) Handle(ctx context.Context, r slog.Record) error {
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		r.AddAttrs(slog.String("trace_id", sc.TraceID().String()))
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+// Обязательный тест из ревью: паника в хендлере проходит всю цепочку
+// Recover → Tracing → Logging → Metrics, и вся телеметрия запроса на месте:
+// клиент получает 500, запрос есть в гистограмме с кодом 500, есть итоговая
+// запись request handled, а запись panic recovered связана с тем же трейсом.
+func TestPanic_FullChainTelemetry(t *testing.T) {
+	t.Parallel()
+
+	r := chi.NewRouter()
+	r.Get(tripRoute, func(http.ResponseWriter, *http.Request) { panic("nil map write") })
+
+	spans := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	var logs bytes.Buffer
+	log := slog.New(traceJSONHandler{slog.NewJSONHandler(&logs, nil)})
+
+	metrics, err := middleware.Metrics(mp, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := middleware.Recover(log)(middleware.Tracing(tp, propagation.TraceContext{}, r)(middleware.Logging(log)(metrics(r))))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/trips/"+tripID, nil))
+
+	// 1. Клиент получил 500.
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+
+	// 2. Спан закрыт с ошибкой.
+	span := onlySpan(t, spans)
+	if span.Status().Code != codes.Error {
+		t.Errorf("span status = %v, want Error", span.Status().Code)
+	}
+	traceID := span.SpanContext().TraceID().String()
+
+	// 3. Запрос есть в гистограмме — с кодом 500, а не пропал.
+	hist, active := collectHTTP(t, reader)
+	var count500 uint64
+	for _, dp := range hist {
+		if attrValue(dp.Attributes, "http.response.status_code") == "500" {
+			count500 += dp.Count
+		}
+	}
+	if count500 != 1 {
+		t.Errorf("запросов с 500 в гистограмме = %d, want 1", count500)
+	}
+	for _, dp := range active {
+		if dp.Value != 0 {
+			t.Errorf("active_requests = %d после паники, want 0", dp.Value)
+		}
+	}
+
+	// 4. Итоговая запись лога есть и связана с трейсом; 5. запись паники тоже.
+	var handled, panicked map[string]any
+	for _, r := range records(t, &logs) {
+		switch r["msg"] {
+		case "request handled":
+			handled = r
+		case "panic recovered":
+			panicked = r
+		}
+	}
+	if handled == nil {
+		t.Fatal("нет итоговой записи request handled")
+	}
+	if handled["level"] != levelError || handled["status"] != float64(http.StatusInternalServerError) || handled["error"] != "panic" {
+		t.Errorf("request handled = %v, want ERROR, 500, error=panic", handled)
+	}
+	if handled["trace_id"] != traceID {
+		t.Errorf("trace_id в request handled = %v, want %s", handled["trace_id"], traceID)
+	}
+	if panicked == nil {
+		t.Fatal("нет записи panic recovered")
+	}
+	if panicked["trace_id"] != traceID {
+		t.Errorf("trace_id в panic recovered = %v, want %s: запись паники не связана с трейсом", panicked["trace_id"], traceID)
+	}
+	if stack, _ := panicked["stack"].(string); !strings.Contains(stack, "middleware_test") && !strings.Contains(stack, "telemetry_test") {
+		t.Error("в стектрейсе нет кадра, где случилась паника")
 	}
 }

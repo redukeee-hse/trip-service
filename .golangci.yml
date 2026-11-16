@@ -57,6 +57,8 @@ linters:
               desc: домен не строит SQL
             - pkg: go.opentelemetry.io/otel
               desc: домен не знает про телеметрию
+            - pkg: github.com/redukeee-hse/avitoService/internal/generated
+              desc: domain не знает про OpenAPI-типы транспорта
         usecase:
           files:
             - "**/internal/usecase/**"

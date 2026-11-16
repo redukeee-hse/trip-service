@@ -77,6 +77,10 @@ func New(ctx context.Context, cfg config.Config) (c *Container, err error) {
 	// repository: репозиторий берёт соединение у того же менеджера, что
 	// открывает транзакции, поэтому запросы внутри tx.Do идут в транзакции.
 	trips := triprepo.New(txManager, cfg.DB.QueryTimeout)
+	if err := telemetry.RegisterActiveTrips(providers.Meter, trips, logger); err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	// usecase: один *triprepo.Repository реализует все узкие интерфейсы,
 	// компилятор проверяет это прямо здесь.
@@ -124,11 +128,15 @@ func New(ctx context.Context, cfg config.Config) (c *Container, err error) {
 }
 
 // Close освобождает ресурсы. Вызывать после Server.Shutdown: иначе
-// незавершённые запросы останутся без соединений с БД. Телеметрия
-// закрывается последней, чтобы дописать спаны последних запросов.
+// незавершённые запросы останутся без соединений с БД.
+//
+// Сначала телеметрия, потом пул: при остановке SDK дописывает накопленные
+// спаны и делает последний сбор метрик, а gauge tripgo.trips.active для
+// этого ходит в БД. Закрой пул раньше — последний сбор упадёт с ошибкой.
 func (c *Container) Close(ctx context.Context) error {
+	err := c.telemetry.Shutdown(ctx)
 	c.pool.Close()
-	if err := c.telemetry.Shutdown(ctx); err != nil {
+	if err != nil {
 		return fmt.Errorf("telemetry shutdown: %w", err)
 	}
 	return nil

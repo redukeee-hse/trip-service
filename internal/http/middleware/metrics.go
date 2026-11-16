@@ -56,11 +56,21 @@ func Metrics(mp metric.MeterProvider, routes RouteFinder) (func(http.Handler) ht
 			defer active.Add(ctx, -1, activeAttrs)
 
 			rec := newStatusRecorder(w)
+			// Запись в defer: при панике хендлера запрос всё равно попадает в
+			// гистограмму — как 500, который вернёт Recover. Иначе аварийные
+			// запросы пропадали бы из метрики и доля ошибок занижалась.
+			completed := false
+			defer func() {
+				status := rec.status
+				if !completed {
+					status = http.StatusInternalServerError
+				}
+				duration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
+					method, route, attribute.Int("http.response.status_code", status),
+				))
+			}()
 			next.ServeHTTP(rec, r)
-
-			duration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
-				method, route, attribute.Int("http.response.status_code", rec.status),
-			))
+			completed = true
 		})
 	}, nil
 }

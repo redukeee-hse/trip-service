@@ -225,10 +225,14 @@ make mutation   # gremlins и go-mutesting по internal/domain и internal/usec
 
 | Инструмент | Пакет | До: убито / выжило | После: убито / выжило |
 |---|---|---|---|
-| gremlins (все мутаторы) | `domain` | 27 / 0, не покрыто 4 | 27 / 0, не покрыто 4 |
+| gremlins (все мутаторы) | `domain` | 27 / 0, не покрыто 4 | 28 / 0, не покрыто 4 |
 | gremlins (все мутаторы) | `usecase` | 18 / 0, тайм-аут 1, не покрыто 1 | 19 / 0, не покрыто 1 |
-| go-mutesting | `domain` | 33 / 0 | 33 / 0 |
-| go-mutesting | `usecase` | 31 / **2** | 33 / 0 |
+| go-mutesting | `domain` | 33 / 0 | 34 / 0 |
+| go-mutesting | `usecase` | 31 / **2** | 30 / 0 |
+
+«После» снято на текущем коде: после правок по ревью (конструктор `trip.New`
+вместо ручного заполнения полей в usecase) число мутантов в пакетах немного
+изменилось, выживших по-прежнему нет.
 
 Разбор:
 
@@ -261,8 +265,9 @@ OpenTelemetry. Логи пишутся в stdout.
 
 `log/slog`, JSON, stdout, уровень из `LOG_LEVEL`. Логгер создаётся в
 `container` и передаётся зависимостью, `slog.Default()` в коде нет. В каждой
-записи есть `service`, а если запись сделана внутри спана — `trace_id` и
-`span_id`: по ним запись находится в Jaeger.
+записи есть `service`, `trace_id` и `span_id`. Если запись сделана внутри
+спана, это его идентификаторы — по ним запись находится в Jaeger; вне запроса
+(`server started`, `server stopped`, ошибки экспорта телеметрии) поля пустые.
 
 ```json
 {"level":"INFO","msg":"request handled","trace_id":"aaf5c1da9f7a246009870b03ff9de24f","span_id":"ba41172c932d7eb1","service":"trip-service","method":"POST","route":"/api/v1/trips","status":201,"duration_ms":6}
@@ -272,9 +277,15 @@ OpenTelemetry. Логи пишутся в stdout.
   **шаблон** маршрута, статус, длительность. Тела не логируются;
 - уровень `Info` для `2xx` и `4xx`, `Error` для `5xx` — тогда в записи есть
   поле `error` с текстом внутренней ошибки (клиент её не видит);
+- в `status` — код, который на самом деле получил клиент: первый финальный
+  `WriteHeader` (или 200 при `Write` без него), повторные вызовы его не меняют;
+- если ответ не удалось записать (клиент оборвал соединение), в записи есть
+  `write_error`, уровень `Warn`;
 - бизнес-события `trip created` и `trip completed` пишут usecase, только с
   `trip_id`;
-- `Recover` пишет `panic recovered` со стектрейсом.
+- при панике итоговая запись тоже пишется: `Error`, `status: 500`,
+  `error: panic`; отдельно `Recover` пишет `panic recovered` со стектрейсом —
+  обе записи с тем же `trace_id`, что и спан запроса.
 
 **Как `trace_id` попадает в лог.** `Tracing` создаёт спан и кладёт его в
 `context` запроса. Дальше этот `ctx` идёт в `Logging`, хендлер и usecase, а
@@ -315,6 +326,7 @@ POST /api/v1/trips
 | `db.client.operation.duration` | histogram, с | `db.operation.name`, `db.collection.name`, `error.type` | `infra/postgres` (трейсер пула) |
 | `tripgo.trips.created` | counter | — | usecase `create` |
 | `tripgo.trips.completed` | counter | — | usecase `finish` |
+| `tripgo.trips.active` | gauge | — | `infra/telemetry`, значение из БД (`CountActive`) в момент сбора |
 
 В Prometheus имена с подчёркиваниями: `http_server_request_duration_seconds`,
 `tripgo_trips_created_total` и т. д.
@@ -327,6 +339,12 @@ POST /api/v1/trips
 Отдельных счётчиков бизнес-ошибок нет: `driver_busy` и `trip_not_found` видны
 по `http.response.status_code`.
 
+`tripgo.trips.active` — observable gauge: SDK при каждом сборе метрик
+спрашивает у БД `count(*)` активных поездок. Up-down counter (+1 при создании,
+−1 при завершении) жил бы в памяти одной копии сервиса: обнулялся бы при
+рестарте и не видел бы поездок, созданных другими копиями. Если БД не ответила,
+точка за интервал пропускается (а не отдаётся 0) и пишется `Warn`.
+
 ### Middleware
 
 ```
@@ -334,9 +352,20 @@ Recover → Tracing → Logging → Metrics → роутер
 ```
 
 `Logging` стоит внутри `Tracing`, поэтому в его записи уже есть `trace_id`.
-`Recover` ловит панику, логирует со стектрейсом, отвечает `500 internal_error`,
-процесс не падает. `Tracing` и `Metrics` узнают шаблон маршрута до роутера
-через `chi.Routes.Find`.
+`Tracing` и `Metrics` узнают шаблон маршрута до роутера через
+`chi.Routes.Find`.
+
+**Паника.** `recover()` вызывается в одном месте — в `Recover`, и панику он
+дальше не пробрасывает: логирует со стектрейсом, отвечает `500 internal_error`,
+процесс не падает. Внутренние middleware панику не перехватывают, а замечают по
+флагу в `defer` (`next.ServeHTTP` не вернулся) и дописывают свою часть
+телеметрии, пока паника поднимается к `Recover`: `Tracing` помечает спан
+`codes.Error` и `error.type=panic`, `Logging` пишет итоговую запись со статусом
+500, `Metrics` кладёт запрос в гистограмму как 500. `Recover` стоит снаружи
+`Tracing` и спана не видит, поэтому `Tracing` оставляет ему контекст со спаном
+через ячейку в `ctx`, и `panic recovered` уходит с `trace_id` запроса.
+`http.ErrAbortHandler` — штатное прерывание ответа: его `Recover` гасит без 500
+и без стектрейса.
 
 ### Если коллектор недоступен
 
@@ -388,7 +417,7 @@ curl localhost:8080/ready
 |---|---|---|
 | `HTTP_ADDR` | `:8080` | адрес HTTP-сервера |
 | `LOG_LEVEL` | `info` | уровень логов: `debug`, `info`, `warn`, `error` |
-| `SHUTDOWN_TIMEOUT` | `10s` | сколько ждать завершения запросов и отправки телеметрии при остановке |
+| `SHUTDOWN_TIMEOUT` | `10s` | общий бюджет остановки: дождаться текущих запросов, дописать телеметрию и закрыть пул |
 | `HTTP_READ_HEADER_TIMEOUT` | `5s` | время на чтение заголовков запроса |
 | `HTTP_READ_TIMEOUT` | `10s` | время на чтение всего запроса |
 | `HTTP_WRITE_TIMEOUT` | `15s` | время на обработку и запись ответа |

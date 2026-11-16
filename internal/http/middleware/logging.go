@@ -23,22 +23,59 @@ func Logging(log *slog.Logger) func(http.Handler) http.Handler {
 			r = r.WithContext(ctx)
 			rec := newStatusRecorder(w)
 
+			// Запись в defer: при панике хендлера итоговая запись всё равно
+			// пишется — со статусом 500 и error=panic. Саму панику со
+			// стектрейсом логирует Recover, с тем же trace_id.
+			completed := false
+			defer func() {
+				log.LogAttrs(r.Context(), requestLevel(rec, completed), "request handled",
+					requestAttrs(r, rec, completed, start, reportedErr)...)
+			}()
 			next.ServeHTTP(rec, r)
-
-			attrs := []slog.Attr{
-				slog.String("method", r.Method),
-				slog.String("route", routePattern(r)),
-				slog.Int("status", rec.status),
-				slog.Int64("duration_ms", time.Since(start).Milliseconds()),
-			}
-			level := slog.LevelInfo
-			if rec.status >= http.StatusInternalServerError {
-				level = slog.LevelError
-				if err := reportedErr(); err != nil {
-					attrs = append(attrs, slog.String("error", err.Error()))
-				}
-			}
-			log.LogAttrs(r.Context(), level, "request handled", attrs...)
+			completed = true
 		})
+	}
+}
+
+// requestAttrs — поля записи "request handled". completed=false значит, что
+// хендлер запаниковал и клиент получит 500 от Recover.
+func requestAttrs(r *http.Request, rec *statusRecorder, completed bool, start time.Time, reportedErr func() error) []slog.Attr {
+	status := rec.status
+	if !completed {
+		status = http.StatusInternalServerError
+	}
+	attrs := []slog.Attr{
+		slog.String("method", r.Method),
+		slog.String("route", routePattern(r)),
+		slog.Int("status", status),
+		slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+	}
+	switch {
+	case !completed:
+		attrs = append(attrs, slog.String("error", "panic"))
+	case status >= http.StatusInternalServerError:
+		if err := reportedErr(); err != nil {
+			attrs = append(attrs, slog.String("error", err.Error()))
+		}
+	}
+	// Ответ не дошёл до клиента (обычно клиент оборвал соединение) — без
+	// этого поля такой запрос выглядел бы в логе успешным.
+	if rec.writeErr != nil {
+		attrs = append(attrs, slog.String("write_error", rec.writeErr.Error()))
+	}
+	return attrs
+}
+
+// requestLevel: Error для 5xx и паники; Warn, если ответ не удалось записать
+// (деградация, но сервис исправен); Info для остальных 2xx и 4xx — ошибка
+// клиента не поломка сервиса.
+func requestLevel(rec *statusRecorder, completed bool) slog.Level {
+	switch {
+	case !completed || rec.status >= http.StatusInternalServerError:
+		return slog.LevelError
+	case rec.writeErr != nil:
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
 	}
 }

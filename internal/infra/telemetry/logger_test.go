@@ -84,13 +84,18 @@ func TestNewLogger_Fields(t *testing.T) {
 				t.Errorf("service = %v, want trip-service", rec["service"])
 			}
 
-			_, hasTrace := rec["trace_id"]
-			_, hasSpan := rec["span_id"]
-			if hasTrace != tt.wantTrace || hasSpan != tt.wantTrace {
-				t.Fatalf("trace_id/span_id present = %v/%v, want %v", hasTrace, hasSpan, tt.wantTrace)
+			// Поля обязательны в каждой записи (conventions), вне спана — пустые.
+			traceID, hasTrace := rec["trace_id"]
+			spanID, hasSpan := rec["span_id"]
+			if !hasTrace || !hasSpan {
+				t.Fatalf("нет обязательных trace_id/span_id: %v", rec)
 			}
-			if tt.wantTrace && (rec["trace_id"] != testTraceID || rec["span_id"] != testSpanID) {
-				t.Errorf("trace_id/span_id = %v/%v, want %s/%s", rec["trace_id"], rec["span_id"], testTraceID, testSpanID)
+			wantTraceID, wantSpanID := "", ""
+			if tt.wantTrace {
+				wantTraceID, wantSpanID = testTraceID, testSpanID
+			}
+			if traceID != wantTraceID || spanID != wantSpanID {
+				t.Errorf("trace_id/span_id = %q/%q, want %q/%q", traceID, spanID, wantTraceID, wantSpanID)
 			}
 		})
 	}

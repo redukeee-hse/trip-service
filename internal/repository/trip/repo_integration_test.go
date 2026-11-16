@@ -404,3 +404,39 @@ func TestRepository_GetByIDForUpdate_LocksRow(t *testing.T) {
 		t.Fatalf("Do: %v", err)
 	}
 }
+
+// CountActive — источник gauge tripgo.trips.active. Тест намеренно без
+// t.Parallel: он сравнивает общее число активных поездок в базе, а
+// параллельные тесты пакета, пока он идёт, стоят на паузе и строк не
+// добавляют. Проверяется разница «после − до», а не абсолютное число.
+func TestRepository_CountActive(t *testing.T) {
+	repo, _ := setup(t)
+	ctx := context.Background()
+
+	before, err := repo.CountActive(ctx)
+	if err != nil {
+		t.Fatalf("CountActive: %v", err)
+	}
+
+	for range 2 {
+		if err := repo.Create(ctx, newTrip(t, uuid.New())); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	finished := newTrip(t, uuid.New())
+	if err := repo.Create(ctx, finished); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := repo.Finish(ctx, finished.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	after, err := repo.CountActive(ctx)
+	if err != nil {
+		t.Fatalf("CountActive: %v", err)
+	}
+	// Две активные считаются, завершённая — нет.
+	if after-before != 2 {
+		t.Errorf("CountActive: было %d, стало %d, want +2", before, after)
+	}
+}

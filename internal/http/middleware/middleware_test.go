@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	casePanic = "panic"
-	tripRoute = "/api/v1/trips/{tripId}"
-	tripID    = "0b5b3a64-5d5c-4c1e-9d43-8d6b7f0c2a11"
+	levelError = "ERROR"
+	casePanic  = "panic"
+	tripRoute  = "/api/v1/trips/{tripId}"
+	tripID     = "0b5b3a64-5d5c-4c1e-9d43-8d6b7f0c2a11"
 )
 
 // newApp собирает цепочку как в container: Recover → Logging → chi-роутер.
@@ -123,7 +124,7 @@ func TestLogging_LevelAndErrorByStatus(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				response.Error(w, r, errors.New("pq: connection refused"))
 			},
-			wantLevel: "ERROR",
+			wantLevel: levelError,
 			wantErr:   "pq: connection refused",
 		},
 	}
@@ -200,7 +201,7 @@ func TestRecover(t *testing.T) {
 	if panicLog == nil {
 		t.Fatal("паника не залогирована")
 	}
-	if panicLog["level"] != "ERROR" || panicLog["route"] != tripRoute {
+	if panicLog["level"] != levelError || panicLog["route"] != tripRoute {
 		t.Errorf("level/route = %v/%v, want ERROR/%s", panicLog["level"], panicLog["route"], tripRoute)
 	}
 	if stack, _ := panicLog["stack"].(string); !strings.Contains(stack, "goroutine") {
@@ -208,17 +209,101 @@ func TestRecover(t *testing.T) {
 	}
 }
 
-func TestRecover_ErrAbortHandlerIsRethrown(t *testing.T) {
+// ErrAbortHandler — штатный способ оборвать ответ. Recover его гасит: паника
+// не выходит наружу, 500 не пишется, стектрейс в лог Error не идёт.
+func TestRecover_ErrAbortHandlerIsSwallowed(t *testing.T) {
 	t.Parallel()
 
-	h := middleware.Recover(newLogger(&bytes.Buffer{}))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	var buf bytes.Buffer
+	h := middleware.Recover(newLogger(&buf))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic(http.ErrAbortHandler)
 	}))
+	rec := httptest.NewRecorder()
 
-	defer func() {
-		if p := recover(); p != http.ErrAbortHandler {
-			t.Errorf("recover() = %v, want http.ErrAbortHandler", p)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil)) // паника сюда не долетает
+
+	if rec.Body.Len() != 0 {
+		t.Errorf("на прерванный запрос ничего не дописываем, got %q", rec.Body.String())
+	}
+	for _, r := range records(t, &buf) {
+		if r["level"] == levelError {
+			t.Errorf("ErrAbortHandler — не ошибка сервиса: %v", r)
 		}
-	}()
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}
+}
+
+// net/http отправляет клиенту первый финальный код. Лог должен показать его,
+// а не последний вызов WriteHeader.
+func TestLogging_FirstStatusWins(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		want    int
+	}{
+		{
+			name: "two WriteHeader calls",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				w.WriteHeader(http.StatusInternalServerError) // net/http проигнорирует
+			},
+			want: http.StatusCreated,
+		},
+		{
+			name: "Write before WriteHeader",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("ok")) // уже отправлен 200
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+			want: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			rec := httptest.NewRecorder()
+			middleware.Logging(newLogger(&buf))(tt.handler).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+			if rec.Code != tt.want {
+				t.Fatalf("клиент получил %d, тест ожидал %d — проверь сам тест", rec.Code, tt.want)
+			}
+			if got := records(t, &buf)[0]["status"]; got != float64(tt.want) {
+				t.Errorf("status в логе = %v, а клиент получил %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// failingWriter имитирует клиента, который закрыл соединение: запись тела падает.
+type failingWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write: broken pipe")
+}
+
+// Ошибка записи ответа не должна теряться: без неё такой запрос выглядел бы
+// в логе успешным.
+func TestLogging_WriteErrorIsLogged(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	h := middleware.Logging(newLogger(&buf))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		response.JSON(w, http.StatusOK, map[string]string{"id": "42"})
+	}))
+
+	h.ServeHTTP(failingWriter{httptest.NewRecorder()}, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	got := records(t, &buf)[0]
+	if got["write_error"] != "write: broken pipe" {
+		t.Errorf("write_error = %v, want ошибку записи", got["write_error"])
+	}
+	if got["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN: ответ не дошёл, но сервис исправен", got["level"])
+	}
 }

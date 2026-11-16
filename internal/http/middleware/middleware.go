@@ -39,20 +39,47 @@ func routePattern(r *http.Request) string {
 	return unknownRoute
 }
 
-// statusRecorder запоминает код ответа, который записал хендлер.
+// statusRecorder запоминает, что на самом деле ушло клиенту: код ответа и
+// ошибку записи тела.
+//
+// net/http отправляет клиенту первый финальный WriteHeader, а повторные
+// игнорирует. Write без WriteHeader сам отправляет 200. Поэтому код
+// фиксируется один раз — при первом финальном WriteHeader или первом Write —
+// и дальше не меняется: иначе после WriteHeader(201); WriteHeader(500) клиент
+// получил бы 201, а логи и метрики показали бы 500.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
+	writeErr    error
 }
 
 func newStatusRecorder(w http.ResponseWriter) *statusRecorder {
-	// Если хендлер не вызвал WriteHeader, net/http отправит 200.
+	// Если хендлер ничего не записал, net/http отправит 200.
 	return &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
+	// 1xx (кроме 101 Switching Protocols) — информационные ответы, после них
+	// ещё будет финальный код, поэтому их не запоминаем.
+	informational := code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+	if !s.wroteHeader && !informational {
+		s.status = code
+		s.wroteHeader = true
+	}
 	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	// Первый Write без WriteHeader отправляет 200 — дальше код не меняется.
+	s.wroteHeader = true
+	n, err := s.ResponseWriter.Write(b)
+	// Запоминаем первую ошибку записи (обычно клиент закрыл соединение):
+	// хендлер её отдать некому, а лог должен показать, что ответ не дошёл.
+	if err != nil && s.writeErr == nil {
+		s.writeErr = err
+	}
+	return n, err
 }
 
 // Unwrap нужен http.ResponseController, чтобы добраться до исходного writer.

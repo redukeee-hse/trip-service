@@ -47,3 +47,28 @@ func (r *Repository) getByID(ctx context.Context, id uuid.UUID, forUpdate bool) 
 	}
 	return t, nil
 }
+
+// CountActive — сколько поездок сейчас в статусе active. Источник для gauge
+// tripgo.trips.active: значение берётся из БД, а не считается в памяти
+// сервиса, поэтому оно верно после рестарта и при нескольких копиях сервиса.
+// Запрос дешёвый: по активным поездкам есть частичный индекс
+// trips_driver_active_uniq.
+func (r *Repository) CountActive(ctx context.Context) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	query, args, err := r.sb.
+		Select("count(*)").
+		From("trips").
+		Where(sq.Eq{colStatus: trip.StatusActive}).
+		ToSql()
+	if err != nil {
+		return 0, fmt.Errorf("build count active trips query: %w", err)
+	}
+
+	var n int64
+	if err := r.db.Executor(ctx).QueryRow(ctx, query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count active trips: %w", err)
+	}
+	return n, nil
+}
