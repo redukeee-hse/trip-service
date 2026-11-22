@@ -19,6 +19,7 @@ type Config struct {
 	IdleTimeout       time.Duration
 	PingTimeout       time.Duration
 	DB                DBConfig
+	Telemetry         TelemetryConfig
 }
 
 type DBConfig struct {
@@ -31,13 +32,7 @@ type DBConfig struct {
 }
 
 func LoadConfig() (Config, error) {
-	addr, err := getStringEnv(
-		"HTTP_ADDR",
-		":8080",
-	)
-	if err != nil {
-		return Config{}, err
-	}
+	addr := getStringEnv("HTTP_ADDR", ":8080")
 
 	logLvl, err := getLogLevelEnv(
 		"LOG_LEVEL",
@@ -136,6 +131,14 @@ func LoadConfig() (Config, error) {
 		"HTTP_PING_TIMEOUT",
 		time.Second,
 	)
+	if err != nil {
+		return Config{}, err
+	}
+
+	telemetry, err := loadTelemetry()
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		Addr:              addr,
@@ -146,6 +149,7 @@ func LoadConfig() (Config, error) {
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 		PingTimeout:       pingTimeout,
+		Telemetry:         telemetry,
 		DB: DBConfig{
 			URL:             url,
 			MaxConns:        maxConns,
@@ -157,14 +161,11 @@ func LoadConfig() (Config, error) {
 	}, nil
 }
 
-func getStringEnv(name string, defaultValue string) (string, error) {
-	value := os.Getenv(name)
-
-	if value == "" {
-		return defaultValue, nil
+func getStringEnv(name, defaultValue string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
 	}
-
-	return value, nil
+	return defaultValue
 }
 
 func getInt32Env(name string, defaultValue int32) (int32, error) {
