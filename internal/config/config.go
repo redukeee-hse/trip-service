@@ -20,6 +20,7 @@ type Config struct {
 	PingTimeout       time.Duration
 	DB                DBConfig
 	Telemetry         TelemetryConfig
+	Push              PushConfig
 }
 
 type DBConfig struct {
@@ -140,6 +141,11 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	push, err := loadPush()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Addr:              addr,
 		LogLvl:            logLvl,
@@ -150,6 +156,7 @@ func LoadConfig() (Config, error) {
 		IdleTimeout:       idleTimeout,
 		PingTimeout:       pingTimeout,
 		Telemetry:         telemetry,
+		Push:              push,
 		DB: DBConfig{
 			URL:             url,
 			MaxConns:        maxConns,
