@@ -1,6 +1,7 @@
 # Trip Service — Go backend для сервиса поездок
 
-HTTP API для создания, получения и завершения поездок. Учебный проект курса
+HTTP API для создания, получения и завершения поездок и сбора координат.
+Сервис сам опрашивает водителей молчащих поездок через Push Service. Учебный проект курса
 «Разработка микросервисов на Go». Данные хранятся в PostgreSQL, схема
 накатывается миграциями goose, HTTP-слой генерируется из OpenAPI-контракта.
 
@@ -10,10 +11,24 @@ log/slog · OpenTelemetry · gomock · testcontainers-go · golangci-lint · Doc
 **Главное:** транзакционная запись поездки и истории статусов, идемпотентное
 создание по `Idempotency-Key`, защита от двух активных поездок водителя
 частичным уникальным индексом, конкурентное завершение через
-`SELECT ... FOR UPDATE`. Код разложен по слоям с зависимостями внутрь, покрыт
+`SELECT ... FOR UPDATE`, фоновый опрос устаревших поездок (сканер → ограниченная
+очередь → worker pool → Push Service) с корректной остановкой. Код разложен по слоям с зависимостями внутрь, покрыт
 unit- и интеграционными тестами и отдаёт логи, трейсы и метрики. Подробности —
-в разделах [Архитектура](#архитектура), [Observability](#observability) и
-[Решения](#решения).
+в разделах [Архитектура](#архитектура), [Опрос устаревших поездок](#опрос-устаревших-поездок),
+[Observability](#observability) и [Решения](#решения).
+
+## Что сделано в ЛР3
+
+- миграции: колонка `trips.last_position_at` и таблица `trip_positions`,
+  отдельной миграцией — индекс под выборку поездок для опроса;
+- ручки `POST` и `GET /api/v1/trips/{tripId}/positions`: точка сохраняется и
+  `last_position_at` сдвигается в одной транзакции, опоздавшая точка поездку не
+  «состаривает»;
+- фоновый опрос: сканер по тикеру, ограниченная очередь с дедупликацией,
+  фиксированный пул воркеров, гейтвей в Push Service по HTTP — см.
+  [Опрос устаревших поездок](#опрос-устаревших-поездок);
+- метрики пула и сканера, span link от воркера к обходу сканера;
+- тесты на конкурентность с `-race` и `goleak`, тикер и время подменяемы.
 
 ## Что сделано в ЛР2
 
@@ -53,9 +68,9 @@ make migrate                   # накатить миграции
 make run                       # собрать и запустить сервис
 ```
 
-Состав окружения задаёт `environment.toml` (`lab = 2`, компоненты `postgres` и
-`observability`). `tripgoctl environment start` создаёт `.env` с адресом БД и
-коллектора. `Makefile` и сам сервис читают его автоматически. Без `.env` все
+Состав окружения задаёт `environment.toml` (`lab = 3`, компоненты `postgres`,
+`observability` и `push` — заглушка Push Service). `tripgoctl environment start`
+создаёт `.env` с адресами БД, коллектора и Push Service. `Makefile` и сам сервис читают его автоматически. Без `.env` все
 переменные можно передать через окружение.
 
 ## Команды Makefile
@@ -103,7 +118,9 @@ make run                       # собрать и запустить серви
 | `http/trip/{create,get,finish}` | разбор запроса, вызов usecase, ответ | `domain`, свой интерфейс usecase, `generated` |
 | `http/domainerror` | единственное место «ошибка → `Problem`» | `domain`, ошибки usecase |
 | `repository/trip` | SQL на squirrel, перевод ошибок Postgres в доменные | `domain`, `pgx` |
-| `infra/postgres`, `infra/telemetry` | пул, менеджер транзакций, OTel SDK, логгер | внешние библиотеки |
+| `worker/positions` | сканер, очередь, пул воркеров, их запуск и остановка | `domain`, свои интерфейсы из `contract.go`, ошибки гейтвея |
+| `gateway/push` | HTTP-клиент Push Service: запрос, коды ответа, таймаут | внешние библиотеки |
+| `infra/postgres`, `infra/telemetry` | пул, менеджер транзакций, OTel SDK, логгер, метрики | внешние библиотеки |
 | `container` | создаёт конкретные реализации и передаёт их в конструкторы | всё |
 
 Во время работы вызовы идут `http → usecase → repository`, а импорты — нет:
@@ -175,6 +192,98 @@ usecase.
   (`/health`, `/ready`), `requesterror` (передаёт текст ошибки 500 из ответа в
   запись лога), `middleware`.
 
+## Опрос устаревших поездок
+
+Если по активной поездке долго нет координат, сервис просит телефон водителя
+прислать координату: отправляет в Push Service команду `REQUEST_POSITION`.
+
+```
+          каждые POSITION_CHECK_INTERVAL
+ ┌────────┐   ListStale   ┌──────────┐
+ │ сканер │ ────────────▶ │ Postgres │  активные, молчат дольше POSITION_STALE_AFTER,
+ └───┬────┘               └──────────┘  самые давние первыми
+     │ Enqueue (не ждёт)
+     ▼
+ ┌──────────────────────────────┐      POST /positions
+ │ очередь: канал на            │ ◀──── Cancel(tripId): координата пришла,
+ │ POSITION_QUEUE_SIZE задач    │       опрашивать не нужно
+ │ + «сейчас в очереди» (mutex) │
+ └───┬──────────────────────────┘
+     │ берут сами
+     ▼
+ ┌──────────────────────────────┐  RequestPosition   ┌──────────────┐
+ │ POSITION_WORKERS воркеров    │ ─────────────────▶ │ Push Service │
+ └──────────────────────────────┘  таймаут PUSH_REQUEST_TIMEOUT    └──────────────┘
+```
+
+Код — `internal/worker/positions` (сканер, очередь, пул, `Service` для запуска и
+остановки) и `internal/gateway/push`.
+
+### Как это работает
+
+- **Сканер** — одна горутина с тикером. На каждом тике один SQL-запрос: активные
+  поездки, у которых `COALESCE(last_position_at, started_at)` раньше
+  `now − POSITION_STALE_AFTER`. Граница считается по часам сервиса, сравнение —
+  в SQL. Состояние поездок в памяти не хранится, поэтому после рестарта опрос
+  продолжается сам. Тики не накладываются: обход идёт в той же горутине, что
+  читает тикер, а `time.Ticker` выбрасывает непрочитанные тики.
+- **Очередь** — буферизованный канал плюс множество «сейчас в очереди». Проверка
+  дубля и отправка в канал выполняются под одним захватом mutex, поэтому поездка
+  не попадёт в очередь дважды. Из множества поездку убирает воркер после
+  обработки или ручка координат.
+- **Воркеры** живут всё время работы сервиса и берут задачи из канала. Горутину
+  на задачу не создаём: при 100 000 молчащих поездок это 100 000 одновременных
+  запросов в Push Service, а пул ограничивает их числом воркеров. Если поездку
+  отменили, пока задача ждала, воркер в Push Service не идёт.
+- **Повторный пуш.** Отметку об отправке не храним: молчащая поездка попадает в
+  выборку на каждом тике, поэтому `POSITION_CHECK_INTERVAL` — это и пауза между
+  повторными пушами водителю. Ставить его в секунду нельзя.
+
+### Когда очередь заполнена
+
+Сканер не ждёт свободного места: постановка неблокирующая. Поездка, которой не
+хватило места, не ставится, растёт `tripgo.stale_checks{result="dropped"}`, в
+лог пишется `Warn`. Она не теряется: координат по ней всё ещё нет, и она попадёт
+в выборку на следующем тике. Медленный Push Service замедляет только воркеров —
+сканер продолжает тикать, HTTP-ручки отвечают как обычно.
+
+### Параметры
+
+| Переменная | По умолчанию | Что задаёт |
+|---|---|---|
+| `POSITION_CHECK_INTERVAL` | `30s` | период тикера сканера = пауза между повторными пушами |
+| `POSITION_STALE_AFTER` | `60s` | сколько без координат считается «давно» |
+| `POSITION_WORKERS` | `4` | число воркеров |
+| `POSITION_QUEUE_SIZE` | `100` | ёмкость очереди |
+| `PUSH_HTTP_URL` | — | **обязательная**, адрес Push Service (пишет `tripgoctl` в `.env`) |
+| `PUSH_REQUEST_TIMEOUT` | `1s` | таймаут одного вызова Push Service |
+
+### Остановка
+
+По `SIGTERM` в пределах общего `SHUTDOWN_TIMEOUT`:
+
+1. HTTP-сервер перестаёт принимать запросы и дожидается текущих;
+2. сканер останавливается, и `Stop` ждёт конца текущего обхода;
+3. очередь закрывается, воркеры дорабатывают то, что в ней осталось; если не
+   успели до дедлайна — их контекст отменяется, текущие вызовы прерываются;
+4. закрываются HTTP-клиент Push Service, телеметрия и пул БД.
+
+Если закрыть очередь раньше сканера, поездки его последнего обхода уйдут в
+`dropped`; если закрыть пул БД раньше воркеров и HTTP-сервера, их запросы
+останутся без соединений. Фоновые компоненты запускаются не от контекста
+сигнала: тот отменяется сразу по `SIGTERM`, и порядок остановки сломался бы.
+
+### Упрощения
+
+Сознательно сделано проще, чем в проде (п. 5.6 ТЗ):
+
+1. выборка — один запрос на тик без `LIMIT`: при десятках тысяч поездок он
+   тяжёлый, а большая часть результата всё равно уйдёт в `dropped`;
+2. очередь — FIFO-канал: поездка, не ответившая на прошлом тике, встаёт в хвост,
+   хотя молчит дольше остальных;
+3. время последней отправки не хранится, поэтому интервал тикера и пауза между
+   пушами — один параметр.
+
 ## Тесты
 
 ```bash
@@ -192,6 +301,8 @@ make test-integration   # репозиторий на реальном PostgreSQ
 | хендлеры | `httptest` + мок usecase | `http/trip/*/handler_test.go`, `http/router` |
 | middleware, логгер, OTel | `httptest`, `tracetest`, `ManualReader` | `http/middleware`, `infra/telemetry` |
 | репозиторий | testcontainers-go, `postgres:16-alpine`, миграции из `migrations/` | `repository/trip/*_integration_test.go` |
+| гейтвей Push Service | `httptest.Server`: контракт, коды, таймаут, переиспользование соединения, трейсинг | `gateway/push/client_test.go` |
+| очередь, пул, сканер, остановка | фейки, управляемый тикер, без `time.Sleep`; `-race`, `goleak` | `worker/positions/*_test.go` |
 
 Обязательные сценарии ТЗ:
 
@@ -205,6 +316,19 @@ make test-integration   # репозиторий на реальном PostgreSQ
 | 6 | невалидное тело → `400 invalid_request` | `create` handler, `create.TestExecute_ValidationError` |
 | 7 | ошибка репозитория → `500` без деталей | `domainerror`, handler, `middleware` |
 | 8 | `INSERT` в двух таблицах откатывается целиком | `TestTransaction_RollbackBothTables` |
+
+Обязательные сценарии ЛР3:
+
+| # | Сценарий | Тест |
+|---|---|---|
+| 1 | выборка: свежая и завершённая не попадают, без координат — попадает | `TestListStale` |
+| 2 | поездка в очереди повторным тиком не добавляется | `TestQueue_Duplicate`, `TestScanner_DuplicateOnNextTick` |
+| 3 | координата между постановкой и обработкой отменяет отправку | `TestPool_CancelledTaskSkipped` |
+| 4 | переполнение даёт `dropped`, а не блокировку сканера | `TestQueue_OverflowDrops`, `TestScanner_DropsWhenFull` |
+| 5 | N задач обрабатываются `POSITION_WORKERS` воркерами | `TestPool_ProcessesWithFixedWorkers` |
+| 6 | по отмене контекста горутин не остаётся | `TestPool_StopsOnContextCancel`, `TestService_*`, `goleak` |
+| 7 | ошибка Push Service не роняет воркер | `TestPool_ErrorDoesNotStopWorker` |
+| 8 | координата обновляет `last_position_at` и откатывается при ошибке | `TestTouchLastPosition_OnlyMovesForward`, `addposition.TestExecute_Errors` |
 
 Интеграционные тесты отделены тегом `//go:build integration`, каждый готовит и
 убирает свои данные и проходит при `-count=2`.
@@ -307,6 +431,12 @@ OpenTelemetry. Логи пишутся в stdout.
   `internal_error` и событие с текстом ошибки, для БД — SQLSTATE (`23505` при
   занятом водителе), для паники — `panic`.
 
+- вызов Push Service — отдельный клиентский спан `push.RequestPosition`
+  (`otelhttp` в транспорте гейтвея), контекст уходит соседу в `traceparent`;
+- обход сканера — спан `positions.scan`, обработка задачи воркером —
+  `positions.request` со своим корнем и **span link** на обход: задача ждёт в
+  очереди дольше, чем длится обход, поэтому дочерним спаном её не сделать.
+
 Трейс создания поездки в Jaeger:
 
 ```
@@ -327,6 +457,12 @@ POST /api/v1/trips
 | `tripgo.trips.created` | counter | — | usecase `create` |
 | `tripgo.trips.completed` | counter | — | usecase `finish` |
 | `tripgo.trips.active` | gauge | — | `infra/telemetry`, значение из БД (`CountActive`) в момент сбора |
+| `tripgo.positions.saved` | counter | — | usecase `addposition`, после коммита |
+| `tripgo.stale_checks` | counter | `result` = `queued` \| `duplicate` \| `dropped` | сканер, на каждую поездку тика |
+| `tripgo.position_requests.queue.size` | gauge | — | длина канала в момент сбора |
+| `tripgo.position_requests.workers.active` | up-down counter | — | воркер, на время обработки задачи |
+| `tripgo.position_requests` | counter | `result` = `success` \| `error` \| `cancelled` | воркер |
+| `tripgo.position_requests.duration` | histogram, с | `result` | воркер, длительность вызова Push Service |
 
 В Prometheus имена с подчёркиваниями: `http_server_request_duration_seconds`,
 `tripgo_trips_created_total` и т. д.
@@ -417,7 +553,7 @@ curl localhost:8080/ready
 |---|---|---|
 | `HTTP_ADDR` | `:8080` | адрес HTTP-сервера |
 | `LOG_LEVEL` | `info` | уровень логов: `debug`, `info`, `warn`, `error` |
-| `SHUTDOWN_TIMEOUT` | `10s` | общий бюджет остановки: дождаться текущих запросов, дописать телеметрию и закрыть пул |
+| `SHUTDOWN_TIMEOUT` | `10s` | общий бюджет остановки: дождаться текущих запросов, дообработать очередь опроса, дописать телеметрию и закрыть пул |
 | `HTTP_READ_HEADER_TIMEOUT` | `5s` | время на чтение заголовков запроса |
 | `HTTP_READ_TIMEOUT` | `10s` | время на чтение всего запроса |
 | `HTTP_WRITE_TIMEOUT` | `15s` | время на обработку и запись ответа |
@@ -436,9 +572,10 @@ curl localhost:8080/ready
 | `OTEL_TRACES_SAMPLER_ARG` | `1` | доля трейсов для `*traceidratio` |
 | `OTEL_RESOURCE_ATTRIBUTES` | — | дополнительные атрибуты ресурса, переопределяют значения по умолчанию |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | интервал отправки метрик, мс (читает SDK) |
+| `POSITION_*`, `PUSH_*` | | опрос устаревших поездок, см. [Параметры](#параметры) |
 
 Если переменная задана с неверным значением (например `DATABASE_MAX_CONNS=abc`
-или `OTEL_EXPORTER_OTLP_PROTOCOL=json`) или не задан `DATABASE_URL`, сервис не
+или `OTEL_EXPORTER_OTLP_PROTOCOL=json`) или не задан `DATABASE_URL` или `PUSH_HTTP_URL`, сервис не
 стартует и пишет, что не так. Если БД недоступна на старте, сервис тоже не
 стартует. Недоступный коллектор старт не блокирует.
 
@@ -451,12 +588,19 @@ curl localhost:8080/ready
 | `POST` | `/api/v1/trips` | `201`, `200` (повтор с `Idempotency-Key`), `400`, `409`, `500` |
 | `GET` | `/api/v1/trips/{tripId}` | `200`, `400`, `404`, `500` |
 | `POST` | `/api/v1/trips/{tripId}/finish` | `200`, `400`, `404`, `409`, `500` |
+| `POST` | `/api/v1/trips/{tripId}/positions` | `201`, `400`, `404`, `409`, `500` |
+| `GET` | `/api/v1/trips/{tripId}/positions` | `200`, `400`, `404`, `500` |
 | `GET` | `/health` | `200` |
 | `GET` | `/ready` | `200`, `503` |
 
 Ошибки отдаются в `application/problem+json` (RFC 9457) с полем `code`:
 `invalid_request`, `trip_not_found`, `trip_completed`, `driver_busy`,
 `idempotency_conflict`, `internal_error`.
+
+Координату принимает только активная поездка (`409` для завершённой);
+`recorded_at` может опережать часы сервера не больше чем на минуту. Маршрут
+отдаётся целиком, по `recorded_at`, затем по `id`; у поездки без точек —
+`{"positions": []}`.
 
 `/health` отвечает `200`, пока жив процесс, и в БД не ходит. `/ready` делает
 `Ping` PostgreSQL и отвечает `503`, если БД недоступна.
@@ -467,15 +611,17 @@ curl localhost:8080/ready
 cmd/trip-service/            main: конфиг, container.New, запуск, graceful shutdown
 internal/config/             чтение и проверка переменных окружения
 internal/container/          создаёт все зависимости и связывает их
-internal/domain/trip/        поездка: статусы, Finish, Validate, доменные ошибки
-internal/usecase/trip/       create, get, finish: usecase.go, contract.go, тесты и моки
-internal/http/trip/          create, get, finish: handler.go, contract.go, тесты и моки
+internal/domain/trip/        поездка, точка маршрута, правила, доменные ошибки
+internal/usecase/trip/       create, get, finish, addposition, listpositions
+internal/http/trip/          хендлеры тех же сценариев, tripapi — маппинг в ответ
 internal/http/domainerror/   ошибка → Problem, одно место
 internal/http/middleware/    Recover, Tracing, Logging, Metrics
 internal/http/router/        адаптер к ServerInterface из oapi-codegen
 internal/repository/trip/    SQL поездок и ключей идемпотентности, интеграционные тесты
 internal/infra/postgres/     пул pgx, трейсер запросов; transaction/ — менеджер транзакций
-internal/infra/telemetry/    OpenTelemetry SDK, slog, бизнес-счётчики
+internal/infra/telemetry/    OpenTelemetry SDK, slog, бизнес-счётчики, метрики опроса
+internal/worker/positions/   сканер, очередь, пул воркеров, запуск и остановка
+internal/gateway/push/       HTTP-клиент Push Service
 internal/generated/          код из OpenAPI (не править руками, make generate)
 migrations/                  миграции goose
 contracts/                   копия контрактов курса
@@ -573,6 +719,38 @@ Usecase `finish` внутри `Do` читает поездку через `SELEC
 занятый ключ и отдаёт ту же поездку (`200`) или `409`. Первый откатился (например,
 `driver_busy`) — ключ откатился вместе с ним, второй создаёт поездку сам.
 
+### Координаты не по порядку
+
+Телефон копит точки без сети и присылает пачкой, поэтому старая точка может
+прийти после свежей. `last_position_at` сдвигается только вперёд, сравнение — в
+самом `UPDATE`:
+
+```sql
+UPDATE trips SET last_position_at = $2, updated_at = $2
+WHERE id = $1 AND (last_position_at IS NULL OR last_position_at < $2)
+```
+
+Чтение значения в Go и запись следом дали бы гонку check-then-act. `IS NULL`
+нужен для первой точки: `NULL < $2` — это не `true`, и без него первая точка
+не записалась бы. Строка поездки перед этим берётся `FOR UPDATE`: иначе
+параллельное завершение проскочило бы между проверкой статуса и `INSERT`.
+
+### Индекс под выборку для опроса
+
+```sql
+CREATE INDEX CONCURRENTLY trips_active_stale_idx
+    ON trips ((COALESCE(last_position_at, started_at)), id)
+    WHERE status = 'active';
+```
+
+Частичный — в нём только активные поездки, завершённые его не раздувают. По
+выражению — запрос фильтрует и сортирует по `COALESCE`, и выражение в запросе
+совпадает с индексом буква в букву (константа `lastSeenExpr`). `id` вторым ключом
+даёт стабильный порядок. Статус в запросе записан литералом, а не параметром:
+с `status = $1` план, закешированный без значений параметров, не может доказать
+условие частичного индекса и уходит в seq scan. `CONCURRENTLY` не блокирует запись
+в живую таблицу, поэтому миграция отдельная и с `-- +goose NO TRANSACTION`.
+
 ### Линтер
 
 `.golangci.yml` — конфиг курса без изменений в наборе линтеров, плюс правила
@@ -600,6 +778,22 @@ curl -sS -X POST localhost:8080/api/v1/trips/$TRIP_ID/finish -i
 seq 20 | xargs -P20 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
   -X POST localhost:8080/api/v1/trips -H 'content-type: application/json' \
   -d @trip.json | sort | uniq -c
+```
+
+### Ручная проверка опроса
+
+```bash
+# создать поездку и не слать координаты: через POSITION_STALE_AFTER в логах
+# Push Service появляется REQUEST_POSITION, не чаще раза за POSITION_CHECK_INTERVAL
+tripgoctl environment logs push-service
+
+# слать координаты каждые 5 секунд — команд быть не должно
+while true; do
+  curl -sS -X POST localhost:8080/api/v1/trips/$TRIP_ID/positions \
+    -H 'content-type: application/json' \
+    -d "{\"coordinates\":{\"latitude\":59.93,\"longitude\":30.33},\"recorded_at\":\"$(date -u +%FT%TZ)\"}" > /dev/null
+  sleep 5
+done
 ```
 
 ## Материалы курса
