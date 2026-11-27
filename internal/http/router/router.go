@@ -1,6 +1,6 @@
 // Package router связывает сгенерированный по OpenAPI роутер с ручками.
 //
-// oapi-codegen генерирует один ServerInterface на все пять операций, а ручки
+// oapi-codegen генерирует один ServerInterface на все операции, а ручки
 // у нас разложены по пакетам. Server — тонкий адаптер: реализует интерфейс и
 // делегирует каждый метод своей ручке. Логики здесь нет, только проводка.
 package router
@@ -13,6 +13,7 @@ import (
 	api "github.com/redukeee-hse/avitoService/internal/generated"
 	"github.com/redukeee-hse/avitoService/internal/http/health"
 	"github.com/redukeee-hse/avitoService/internal/http/response"
+	"github.com/redukeee-hse/avitoService/internal/http/trip/addposition"
 	"github.com/redukeee-hse/avitoService/internal/http/trip/create"
 	"github.com/redukeee-hse/avitoService/internal/http/trip/finish"
 	"github.com/redukeee-hse/avitoService/internal/http/trip/get"
@@ -22,10 +23,11 @@ import (
 // позиционных параметров: при новой ручке не надо переставлять аргументы,
 // а имена полей не затеняют имена пакетов create/get/finish.
 type Handlers struct {
-	Create *create.Handler
-	Get    *get.Handler
-	Finish *finish.Handler
-	Health *health.Handler
+	Create      *create.Handler
+	Get         *get.Handler
+	Finish      *finish.Handler
+	AddPosition *addposition.Handler
+	Health      *health.Handler
 }
 
 type server struct {
@@ -65,6 +67,10 @@ func (s *server) GetTrip(w http.ResponseWriter, r *http.Request, tripID api.Trip
 
 func (s *server) FinishTrip(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
 	s.h.Finish.Handle(w, r, tripID)
+}
+
+func (s *server) CreateTripPosition(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
+	s.h.AddPosition.Handle(w, r, tripID)
 }
 
 func (s *server) Health(w http.ResponseWriter, r *http.Request) {

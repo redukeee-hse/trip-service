@@ -70,8 +70,8 @@ func New(
 }
 
 func (t *Trip) Finish(finishedAt time.Time) error {
-	if t.Status != StatusActive {
-		return ErrTripCompleted
+	if err := t.EnsureActive(); err != nil {
+		return err
 	}
 	t.Status = StatusCompleted
 	t.FinishedAt = &finishedAt
