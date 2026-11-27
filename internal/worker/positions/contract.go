@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/redukeee-hse/avitoService/internal/domain/trip"
 )
 
 // pusher — то, что воркеру нужно от Push Service. Реализация —
@@ -29,4 +31,14 @@ type poolMetrics interface {
 	WorkerBusy(ctx context.Context)                                     // tripgo.position_requests.workers.active +1
 	WorkerIdle(ctx context.Context)                                     // ... −1
 	Request(ctx context.Context, result Result, duration time.Duration) // tripgo.position_requests и .duration
+}
+
+// staleLister — выборка поездок для опроса (repository/trip.ListStale).
+type staleLister interface {
+	ListStale(ctx context.Context, before time.Time, limit uint64) ([]trip.StaleTrip, error)
+}
+
+// scannerMetrics — tripgo.stale_checks{result}: что сканер сделал с поездкой.
+type scannerMetrics interface {
+	StaleCheck(ctx context.Context, result EnqueueResult)
 }
