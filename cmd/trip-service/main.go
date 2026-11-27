@@ -50,6 +50,8 @@ func run() error {
 		log.Debug(".env not loaded", slog.String("error", envErr.Error()))
 	}
 
+	c.Positions.Start()
+
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Info("server started", slog.String("addr", cfg.Addr))
@@ -70,8 +72,7 @@ func run() error {
 }
 
 // shutdown останавливает сервис в пределах одного общего бюджета
-// SHUTDOWN_TIMEOUT: сначала HTTP-сервер дожидается текущих запросов, затем
-// закрываются пул и телеметрия — на сколько времени осталось.
+// SHUTDOWN_TIMEOUT: HTTP-сервер → сканер и воркеры → ресурсы.
 //
 // Контекст создаётся здесь, в момент остановки, а не при старте: иначе
 // таймер шёл бы с запуска сервиса и к сигналу уже истёк. И от контекста
@@ -85,8 +86,10 @@ func shutdown(c *container.Container, timeout time.Duration) error {
 		c.Logger.Warn("graceful shutdown timed out, closing forcibly", slog.String("error", err.Error()))
 		errs = append(errs, err, c.Server.Close())
 	}
-	// Ресурсы закрываются после сервера: иначе незавершённые запросы
-	// остались бы без соединений с БД.
+	if err := c.Positions.Stop(ctx); err != nil {
+		c.Logger.Warn("position workers did not finish in time, stopped forcibly", slog.String("error", err.Error()))
+		errs = append(errs, err)
+	}
 	if err := c.Close(ctx); err != nil {
 		errs = append(errs, err)
 	}

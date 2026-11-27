@@ -90,13 +90,13 @@ type fakeScanMetrics struct {
 	counts map[positions.EnqueueResult]int
 }
 
-func (m *fakeScanMetrics) StaleCheck(_ context.Context, r positions.EnqueueResult) {
+func (m *fakeScanMetrics) StaleCheck(_ context.Context, r string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.counts == nil {
 		m.counts = map[positions.EnqueueResult]int{}
 	}
-	m.counts[r]++
+	m.counts[positions.EnqueueResult(r)]++
 }
 
 func (m *fakeScanMetrics) get(r positions.EnqueueResult) int {

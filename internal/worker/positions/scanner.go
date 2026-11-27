@@ -85,7 +85,7 @@ func (s *Scanner) scan(ctx context.Context) {
 	}
 	for _, tr := range trips {
 		res := s.queue.Enqueue(Task{Trip: tr, Origin: span.SpanContext()})
-		s.metrics.StaleCheck(ctx, res)
+		s.metrics.StaleCheck(ctx, string(res))
 		if res == Dropped {
 			s.log.WarnContext(ctx, "position request dropped: queue is full",
 				slog.String("trip_id", tr.ID.String()))

@@ -124,3 +124,75 @@ func (mr *MocktxManagerMockRecorder) Do(ctx, fn any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Do", reflect.TypeOf((*MocktxManager)(nil).Do), ctx, fn)
 }
+
+// MockpositionRequests is a mock of positionRequests interface.
+type MockpositionRequests struct {
+	ctrl     *gomock.Controller
+	recorder *MockpositionRequestsMockRecorder
+	isgomock struct{}
+}
+
+// MockpositionRequestsMockRecorder is the mock recorder for MockpositionRequests.
+type MockpositionRequestsMockRecorder struct {
+	mock *MockpositionRequests
+}
+
+// NewMockpositionRequests creates a new mock instance.
+func NewMockpositionRequests(ctrl *gomock.Controller) *MockpositionRequests {
+	mock := &MockpositionRequests{ctrl: ctrl}
+	mock.recorder = &MockpositionRequestsMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockpositionRequests) EXPECT() *MockpositionRequestsMockRecorder {
+	return m.recorder
+}
+
+// Cancel mocks base method.
+func (m *MockpositionRequests) Cancel(tripID uuid.UUID) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Cancel", tripID)
+}
+
+// Cancel indicates an expected call of Cancel.
+func (mr *MockpositionRequestsMockRecorder) Cancel(tripID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Cancel", reflect.TypeOf((*MockpositionRequests)(nil).Cancel), tripID)
+}
+
+// MockpositionMetrics is a mock of positionMetrics interface.
+type MockpositionMetrics struct {
+	ctrl     *gomock.Controller
+	recorder *MockpositionMetricsMockRecorder
+	isgomock struct{}
+}
+
+// MockpositionMetricsMockRecorder is the mock recorder for MockpositionMetrics.
+type MockpositionMetricsMockRecorder struct {
+	mock *MockpositionMetrics
+}
+
+// NewMockpositionMetrics creates a new mock instance.
+func NewMockpositionMetrics(ctrl *gomock.Controller) *MockpositionMetrics {
+	mock := &MockpositionMetrics{ctrl: ctrl}
+	mock.recorder = &MockpositionMetricsMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockpositionMetrics) EXPECT() *MockpositionMetricsMockRecorder {
+	return m.recorder
+}
+
+// PositionSaved mocks base method.
+func (m *MockpositionMetrics) PositionSaved(ctx context.Context) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "PositionSaved", ctx)
+}
+
+// PositionSaved indicates an expected call of PositionSaved.
+func (mr *MockpositionMetricsMockRecorder) PositionSaved(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PositionSaved", reflect.TypeOf((*MockpositionMetrics)(nil).PositionSaved), ctx)
+}

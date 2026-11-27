@@ -22,10 +22,11 @@ const (
 	ResultCancelled Result = "cancelled" // координата пришла, пока задача ждала в очереди
 )
 
+// result — строка, чтобы infra/telemetry не импортировал этот пакет.
 type poolMetrics interface {
 	WorkerBusy(ctx context.Context)
 	WorkerIdle(ctx context.Context)
-	Request(ctx context.Context, result Result, duration time.Duration)
+	Request(ctx context.Context, result string, duration time.Duration)
 }
 
 type staleLister interface {
@@ -33,5 +34,5 @@ type staleLister interface {
 }
 
 type scannerMetrics interface {
-	StaleCheck(ctx context.Context, result EnqueueResult)
+	StaleCheck(ctx context.Context, result string)
 }

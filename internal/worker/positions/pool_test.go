@@ -9,12 +9,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/redukeee-hse/avitoService/internal/worker/positions"
 )
 
 func newPool(q *positions.Queue, p *fakePusher, workers int, m *fakeMetrics) *positions.Pool {
-	return positions.NewPool(q, p, workers, time.Second, m, slog.New(slog.DiscardHandler), time.Now)
+	return positions.NewPool(q, p, workers, time.Second, m, noop.NewTracerProvider().Tracer(""), slog.New(slog.DiscardHandler), time.Now)
 }
 
 // startPool запускает Run в фоне; wait ждёт его возврата (со страховкой
@@ -170,7 +173,7 @@ func TestPool_TaskTimeout(t *testing.T) {
 		return ctx.Err()
 	}}
 	m := newFakeMetrics()
-	pool := positions.NewPool(q, p, 1, 20*time.Millisecond, m, slog.New(slog.DiscardHandler), time.Now)
+	pool := positions.NewPool(q, p, 1, 20*time.Millisecond, m, noop.NewTracerProvider().Tracer(""), slog.New(slog.DiscardHandler), time.Now)
 	startPool(t, context.Background(), pool)()
 
 	if m.count(positions.ResultError) != 1 {
@@ -199,4 +202,45 @@ func TestPool_StopsOnContextCancel(t *testing.T) {
 	<-inCall
 	cancel()
 	wait() // и занятый, и простаивающий воркер вышли
+}
+
+// Спан воркера связан со спаном обхода через span link, а не через родителя:
+// обработка асинхронна и переживает обход (docs/observability.md, ЛР3).
+func TestPool_SpanLinkToScan(t *testing.T) {
+	t.Parallel()
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	_, scan := tp.Tracer("test").Start(context.Background(), "positions.scan")
+	scan.End() // обход закончился раньше, чем воркер взял задачу
+
+	q := positions.NewQueue(1)
+	tk := task()
+	tk.Origin = scan.SpanContext()
+	q.Enqueue(tk)
+	q.Close()
+
+	pool := positions.NewPool(q, &fakePusher{}, 1, time.Second, newFakeMetrics(), tp.Tracer("test"),
+		slog.New(slog.DiscardHandler), time.Now)
+	startPool(t, context.Background(), pool)()
+
+	var req sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == "positions.request" {
+			req = s
+		}
+	}
+	if req == nil {
+		t.Fatal("нет спана positions.request")
+	}
+	if req.Parent().IsValid() {
+		t.Error("спан воркера дочерний — нужен link, а не родитель")
+	}
+	if req.SpanContext().TraceID() == scan.SpanContext().TraceID() {
+		t.Error("спан воркера в трейсе обхода — должен быть своим корнем")
+	}
+	links := req.Links()
+	if len(links) != 1 || links[0].SpanContext.SpanID() != scan.SpanContext().SpanID() {
+		t.Errorf("links = %+v, want одна ссылка на спан обхода %s", links, scan.SpanContext().SpanID())
+	}
 }

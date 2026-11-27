@@ -7,6 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/redukeee-hse/avitoService/internal/gateway/push"
 )
 
@@ -17,6 +21,7 @@ type Pool struct {
 	workers int
 	timeout time.Duration // на одну задачу
 	metrics poolMetrics
+	tracer  trace.Tracer
 	log     *slog.Logger
 	now     func() time.Time
 }
@@ -27,6 +32,7 @@ func NewPool(
 	workers int,
 	timeout time.Duration,
 	metrics poolMetrics,
+	tracer trace.Tracer,
 	log *slog.Logger,
 	now func() time.Time,
 ) *Pool {
@@ -36,6 +42,7 @@ func NewPool(
 		workers: workers,
 		timeout: timeout,
 		metrics: metrics,
+		tracer:  tracer,
 		log:     log,
 		now:     now,
 	}
@@ -74,9 +81,17 @@ func (p *Pool) worker(ctx context.Context) {
 func (p *Pool) handle(ctx context.Context, t Task) {
 	id := t.Trip.ID
 
+	// Link, а не родитель: обход сканера заканчивается раньше обработки.
+	ctx, span := p.tracer.Start(ctx, "positions.request",
+		trace.WithNewRoot(),
+		trace.WithLinks(trace.Link{SpanContext: t.Origin}),
+		trace.WithAttributes(attribute.String("trip.id", id.String())))
+	defer span.End()
+
 	// Координата пришла, пока задача ждала в очереди.
 	if !p.queue.isPending(id) {
-		p.metrics.Request(ctx, ResultCancelled, 0)
+		p.metrics.Request(ctx, string(ResultCancelled), 0)
+		span.SetAttributes(attribute.String("result", string(ResultCancelled)))
 		return
 	}
 	// После вызова, а не до: пока идёт вызов, сканер не поставит поездку снова.
@@ -93,7 +108,10 @@ func (p *Pool) handle(ctx context.Context, t Task) {
 	elapsed := p.now().Sub(start)
 
 	if err != nil {
-		p.metrics.Request(ctx, ResultError, elapsed)
+		p.metrics.Request(ctx, string(ResultError), elapsed)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "request position")
+		span.SetAttributes(attribute.String("result", string(ResultError)))
 		level := slog.LevelError
 		if errors.Is(err, push.ErrUnavailable) || errors.Is(err, context.DeadlineExceeded) {
 			level = slog.LevelWarn
@@ -104,5 +122,6 @@ func (p *Pool) handle(ctx context.Context, t Task) {
 			slog.Any("error", err))
 		return
 	}
-	p.metrics.Request(ctx, ResultSuccess, elapsed)
+	p.metrics.Request(ctx, string(ResultSuccess), elapsed)
+	span.SetAttributes(attribute.String("result", string(ResultSuccess)))
 }

@@ -12,13 +12,15 @@ import (
 )
 
 type Usecase struct {
-	tx   txManager
-	repo tripRepository
-	now  func() time.Time
+	tx       txManager
+	repo     tripRepository
+	requests positionRequests
+	metrics  positionMetrics
+	now      func() time.Time
 }
 
-func New(tx txManager, repo tripRepository, now func() time.Time) *Usecase {
-	return &Usecase{tx: tx, repo: repo, now: now}
+func New(tx txManager, repo tripRepository, requests positionRequests, metrics positionMetrics, now func() time.Time) *Usecase {
+	return &Usecase{tx: tx, repo: repo, requests: requests, metrics: metrics, now: now}
 }
 
 // Execute сохраняет точку и сдвигает last_position_at в одной транзакции.
@@ -51,5 +53,9 @@ func (u *Usecase) Execute(
 	if err != nil {
 		return trip.Position{}, fmt.Errorf("add position to trip %s: %w", tripID, err)
 	}
+
+	// После коммита: откатившаяся транзакция точку не сохранила.
+	u.requests.Cancel(tripID)
+	u.metrics.PositionSaved(ctx)
 	return saved, nil
 }

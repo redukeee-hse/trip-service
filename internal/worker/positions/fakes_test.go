@@ -65,10 +65,10 @@ func (m *fakeMetrics) WorkerIdle(context.Context) {
 	m.busy--
 }
 
-func (m *fakeMetrics) Request(_ context.Context, r positions.Result, _ time.Duration) {
+func (m *fakeMetrics) Request(_ context.Context, r string, _ time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.results[r]++
+	m.results[positions.Result(r)]++
 }
 
 func (m *fakeMetrics) count(r positions.Result) int {

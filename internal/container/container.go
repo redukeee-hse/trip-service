@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/redukeee-hse/avitoService/internal/config"
+	"github.com/redukeee-hse/avitoService/internal/gateway/push"
 	"github.com/redukeee-hse/avitoService/internal/http/health"
 	"github.com/redukeee-hse/avitoService/internal/http/middleware"
 	"github.com/redukeee-hse/avitoService/internal/http/router"
@@ -33,6 +34,7 @@ import (
 	finishuc "github.com/redukeee-hse/avitoService/internal/usecase/trip/finish"
 	getuc "github.com/redukeee-hse/avitoService/internal/usecase/trip/get"
 	listpositionsuc "github.com/redukeee-hse/avitoService/internal/usecase/trip/listpositions"
+	"github.com/redukeee-hse/avitoService/internal/worker/positions"
 )
 
 // Container — то, что нужно main: что запустить, чем логировать и что
@@ -40,7 +42,9 @@ import (
 type Container struct {
 	Server    *http.Server
 	Logger    *slog.Logger
+	Positions *positions.Service
 	pool      *pgxpool.Pool
+	push      *push.Client
 	telemetry *telemetry.Providers
 }
 
@@ -86,13 +90,38 @@ func New(ctx context.Context, cfg config.Config) (c *Container, err error) {
 		return nil, err
 	}
 
+	positionMetrics, err := telemetry.NewPositionMetrics(providers.Meter)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+
+	// worker: очередь нужна ручке координат, поэтому создаётся раньше usecase.
+	queue := positions.NewQueue(cfg.Positions.QueueSize)
+	if err := telemetry.RegisterQueueSize(providers.Meter, queue.Len); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	pushClient := push.New(cfg.Push.URL, cfg.Push.RequestTimeout, providers.Tracer, providers.Propagator)
+	tracer := providers.Tracer.Tracer("github.com/redukeee-hse/avitoService/internal/worker/positions")
+	positionsSvc := positions.NewService(
+		positions.NewScanner(trips, queue, positions.ScannerConfig{
+			Interval:   cfg.Positions.CheckInterval,
+			StaleAfter: cfg.Positions.StaleAfter,
+			Limit:      uint64(cfg.Positions.QueueSize), //nolint:gosec // QueueSize > 0, проверено в config
+		}, positions.NewTimeTicker, time.Now, tracer, positionMetrics, logger),
+		queue,
+		positions.NewPool(queue, pushClient, cfg.Positions.Workers, cfg.Push.RequestTimeout,
+			positionMetrics, tracer, logger, time.Now),
+	)
+
 	// usecase: один *triprepo.Repository реализует все узкие интерфейсы,
 	// компилятор проверяет это прямо здесь.
 	now := time.Now
 	createTrip := createuc.New(txManager, trips, trips, now, tripMetrics, logger)
 	getTrip := getuc.New(trips)
 	finishTrip := finishuc.New(txManager, trips, now, tripMetrics, logger)
-	addPosition := addpositionuc.New(txManager, trips, now)
+	addPosition := addpositionuc.New(txManager, trips, queue, positionMetrics, now)
 	listPositions := listpositionsuc.New(trips)
 
 	// http
@@ -132,16 +161,23 @@ func New(ctx context.Context, cfg config.Config) (c *Container, err error) {
 		IdleTimeout:       cfg.IdleTimeout,
 	}
 
-	return &Container{Server: server, Logger: logger, pool: pool, telemetry: providers}, nil
+	return &Container{
+		Server:    server,
+		Logger:    logger,
+		Positions: positionsSvc,
+		pool:      pool,
+		push:      pushClient,
+		telemetry: providers,
+	}, nil
 }
 
-// Close освобождает ресурсы. Вызывать после Server.Shutdown: иначе
-// незавершённые запросы останутся без соединений с БД.
+// Close освобождает ресурсы. Вызывать после Server.Shutdown и Positions.Stop.
 //
 // Сначала телеметрия, потом пул: при остановке SDK дописывает накопленные
 // спаны и делает последний сбор метрик, а gauge tripgo.trips.active для
 // этого ходит в БД. Закрой пул раньше — последний сбор упадёт с ошибкой.
 func (c *Container) Close(ctx context.Context) error {
+	c.push.Close()
 	err := c.telemetry.Shutdown(ctx)
 	c.pool.Close()
 	if err != nil {

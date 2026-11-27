@@ -50,13 +50,18 @@ func TestExecute_Success(t *testing.T) {
 	// Порядок важен: сначала блокировка строки поездки, потом проверка
 	// статуса, потом записи. Блокировка — именно ForUpdate, иначе
 	// параллельный finish проскочит между проверкой и INSERT.
+	requests := NewMockpositionRequests(ctrl)
+	metrics := NewMockpositionMetrics(ctrl)
 	gomock.InOrder(
 		repo.EXPECT().GetByIDForUpdate(gomock.Any(), id).Return(trip.Trip{ID: id, Status: trip.StatusActive}, nil),
 		repo.EXPECT().AddPosition(gomock.Any(), newPos(id)).Return(saved, nil),
 		repo.EXPECT().TouchLastPosition(gomock.Any(), id, recordedAt).Return(nil),
+		// После коммита: опрос поездки отменяется, счётчик +1.
+		requests.EXPECT().Cancel(id),
+		metrics.EXPECT().PositionSaved(gomock.Any()),
 	)
 
-	got, err := addposition.New(tx, repo, fixedNow).Execute(context.Background(), id, coords, recordedAt)
+	got, err := addposition.New(tx, repo, requests, metrics, fixedNow).Execute(context.Background(), id, coords, recordedAt)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -74,7 +79,7 @@ func TestExecute_InvalidPosition_NoTx(t *testing.T) {
 	repo := NewMocktripRepository(ctrl)
 	// Никаких EXPECT: любой вызов tx или repo провалит тест.
 
-	_, err := addposition.New(tx, repo, fixedNow).Execute(context.Background(), uuid.New(),
+	_, err := addposition.New(tx, repo, NewMockpositionRequests(ctrl), NewMockpositionMetrics(ctrl), fixedNow).Execute(context.Background(), uuid.New(),
 		trip.Coordinates{Latitude: 91, Longitude: 0}, recordedAt)
 
 	var vErr *trip.ValidationError
@@ -89,7 +94,8 @@ func TestExecute_FuturePosition_NoTx(t *testing.T) {
 	t.Parallel()
 
 	ctrl := gomock.NewController(t)
-	_, err := addposition.New(NewMocktxManager(ctrl), NewMocktripRepository(ctrl), fixedNow).
+	_, err := addposition.New(NewMocktxManager(ctrl), NewMocktripRepository(ctrl),
+		NewMockpositionRequests(ctrl), NewMockpositionMetrics(ctrl), fixedNow).
 		Execute(context.Background(), uuid.New(), coords, fixedNow().Add(2*time.Minute))
 
 	var vErr *trip.ValidationError
@@ -158,7 +164,9 @@ func TestExecute_Errors(t *testing.T) {
 			runInTx(tx)
 			tt.setup(repo, id)
 
-			got, err := addposition.New(tx, repo, fixedNow).Execute(context.Background(), id, coords, recordedAt)
+			// Ни Cancel, ни PositionSaved: транзакция не закоммичена, точки нет.
+			got, err := addposition.New(tx, repo, NewMockpositionRequests(ctrl), NewMockpositionMetrics(ctrl), fixedNow).
+				Execute(context.Background(), id, coords, recordedAt)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want errors.Is %v", err, tt.want)
 			}
