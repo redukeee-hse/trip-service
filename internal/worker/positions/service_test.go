@@ -35,7 +35,7 @@ func newService(t *testing.T, lister *blockingLister, pusher *fakePusher, queueS
 	tracer := noop.NewTracerProvider().Tracer("")
 	log := slog.New(slog.DiscardHandler)
 	scanner := positions.NewScanner(lister, env.queue,
-		positions.ScannerConfig{Interval: time.Second, StaleAfter: time.Second, Limit: 10},
+		positions.ScannerConfig{Interval: time.Second, StaleAfter: time.Second},
 		func(time.Duration) positions.Ticker { return env.ticker },
 		time.Now, tracer, env.scans, log)
 	pool := positions.NewPool(env.queue, pusher, 2, time.Second, env.metrics, tracer, log, time.Now)
@@ -51,7 +51,7 @@ type blockingLister struct {
 	trips   []trip.StaleTrip
 }
 
-func (l *blockingLister) ListStale(context.Context, time.Time, uint64) ([]trip.StaleTrip, error) {
+func (l *blockingLister) ListStale(context.Context, time.Time) ([]trip.StaleTrip, error) {
 	if l.entered != nil {
 		close(l.entered)
 		<-l.release

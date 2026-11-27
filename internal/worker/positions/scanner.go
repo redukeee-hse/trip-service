@@ -12,7 +12,6 @@ import (
 type ScannerConfig struct {
 	Interval   time.Duration
 	StaleAfter time.Duration
-	Limit      uint64 // поездок за тик; больше ёмкости очереди читать бессмысленно
 }
 
 // Scanner на каждом тике берёт из БД молчащие поездки и ставит их в очередь.
@@ -76,7 +75,7 @@ func (s *Scanner) scan(ctx context.Context) {
 	defer span.End()
 
 	before := s.now().Add(-s.cfg.StaleAfter)
-	trips, err := s.repo.ListStale(ctx, before, s.cfg.Limit)
+	trips, err := s.repo.ListStale(ctx, before)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "list stale trips")

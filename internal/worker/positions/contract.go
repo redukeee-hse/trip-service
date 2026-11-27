@@ -30,7 +30,7 @@ type poolMetrics interface {
 }
 
 type staleLister interface {
-	ListStale(ctx context.Context, before time.Time, limit uint64) ([]trip.StaleTrip, error)
+	ListStale(ctx context.Context, before time.Time) ([]trip.StaleTrip, error)
 }
 
 type scannerMetrics interface {

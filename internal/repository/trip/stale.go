@@ -14,9 +14,10 @@ import (
 // иначе индекс не применится.
 const lastSeenExpr = "COALESCE(last_position_at, started_at)"
 
-// ListStale возвращает активные поездки, молчащие с before, самые давние
-// первыми. before считается по часам сервиса, чтобы его можно было подменить в тестах.
-func (r *Repository) ListStale(ctx context.Context, before time.Time, limit uint64) ([]trip.StaleTrip, error) {
+// ListStale возвращает все активные поездки, молчащие с before, самые давние
+// первыми, без LIMIT. before считается по часам сервиса, чтобы его можно было
+// подменить в тестах.
+func (r *Repository) ListStale(ctx context.Context, before time.Time) ([]trip.StaleTrip, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()
 
@@ -27,7 +28,6 @@ func (r *Repository) ListStale(ctx context.Context, before time.Time, limit uint
 		Where(colStatus+" = '"+string(trip.StatusActive)+"'").
 		Where(sq.Lt{lastSeenExpr: before}).
 		OrderBy(lastSeenExpr, "id").
-		Limit(limit).
 		ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("build select stale trips query: %w", err)

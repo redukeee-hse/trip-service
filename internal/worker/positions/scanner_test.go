@@ -64,13 +64,12 @@ type listReply struct {
 
 type listCall struct {
 	before time.Time
-	limit  uint64
 }
 
-func (f *fakeLister) ListStale(_ context.Context, before time.Time, limit uint64) ([]trip.StaleTrip, error) {
+func (f *fakeLister) ListStale(_ context.Context, before time.Time) ([]trip.StaleTrip, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, listCall{before: before, limit: limit})
+	f.calls = append(f.calls, listCall{before: before})
 	if len(f.replies) == 0 {
 		return nil, nil
 	}
@@ -127,7 +126,7 @@ func startScanner(t *testing.T, queueSize int, replies ...listReply) *scannerEnv
 	}
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(env.spans))
 	s := positions.NewScanner(env.lister, env.queue,
-		positions.ScannerConfig{Interval: 30 * time.Second, StaleAfter: time.Minute, Limit: uint64(queueSize)}, //nolint:gosec // queueSize — маленькая положительная константа теста
+		positions.ScannerConfig{Interval: 30 * time.Second, StaleAfter: time.Minute},
 		func(d time.Duration) positions.Ticker {
 			env.ticker.interval = d
 			return env.ticker
@@ -178,8 +177,8 @@ func TestScanner_QueuesStaleTrips(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("ListStale вызван %d раз, want 1 на один тик", len(calls))
 	}
-	if want := scanNow.Add(-time.Minute); !calls[0].before.Equal(want) || calls[0].limit != 10 {
-		t.Errorf("ListStale(before=%v, limit=%d), want (%v, 10)", calls[0].before, calls[0].limit, want)
+	if want := scanNow.Add(-time.Minute); !calls[0].before.Equal(want) {
+		t.Errorf("ListStale(before=%v), want %v", calls[0].before, want)
 	}
 	if env.queue.Len() != 2 || env.metrics.get(positions.Queued) != 2 {
 		t.Errorf("в очереди %d, queued=%d; want 2 и 2", env.queue.Len(), env.metrics.get(positions.Queued))
@@ -270,7 +269,7 @@ func TestScanner_NoopTracer(t *testing.T) {
 	tk := &fakeTicker{c: make(chan time.Time)}
 	q := positions.NewQueue(10)
 	s := positions.NewScanner(&fakeLister{replies: []listReply{{trips: staleTrips(1)}}}, q,
-		positions.ScannerConfig{Interval: time.Second, StaleAfter: time.Second, Limit: 10},
+		positions.ScannerConfig{Interval: time.Second, StaleAfter: time.Second},
 		func(time.Duration) positions.Ticker { return tk },
 		time.Now, noop.NewTracerProvider().Tracer(""), &fakeScanMetrics{}, slog.New(slog.DiscardHandler))
 

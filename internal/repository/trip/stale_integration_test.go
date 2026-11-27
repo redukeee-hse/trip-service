@@ -52,7 +52,7 @@ func TestListStale(t *testing.T) {
 	}
 	onBoundary := create(before) // ровно на границе — ещё не устарела (строго <)
 
-	got, err := repo.ListStale(ctx, before, 100)
+	got, err := repo.ListStale(ctx, before)
 	if err != nil {
 		t.Fatalf("ListStale: %v", err)
 	}
@@ -80,14 +80,5 @@ func TestListStale(t *testing.T) {
 		case onBoundary.ID:
 			t.Error("в выборку попала поездка ровно на границе (нужно строго <)")
 		}
-	}
-
-	// LIMIT отдаёт самые давние, а не случайные.
-	one, err := repo.ListStale(ctx, before, 1)
-	if err != nil {
-		t.Fatalf("ListStale limit 1: %v", err)
-	}
-	if len(one) != 1 || one[0].ID != noCoords.ID {
-		t.Errorf("limit 1: got %+v, want только %s", one, noCoords.ID)
 	}
 }
