@@ -24,8 +24,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request, tripID api.Trip
 		return
 	}
 
-	// make, а не var: nil-срез сериализуется в "positions": null, а контракт
-	// обещает массив — у поездки без точек клиент должен получить [].
+	// make, а не var: nil-срез сериализуется в null, а контракт обещает [].
 	body := api.TripPositionsResponse{Positions: make([]api.TripPosition, 0, len(positions))}
 	for _, p := range positions {
 		body.Positions = append(body.Positions, tripapi.PositionFromDomain(p))

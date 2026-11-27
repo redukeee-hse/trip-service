@@ -8,11 +8,9 @@ CREATE TABLE trip_positions (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Таблица только что создана и пуста, поэтому индекс строится обычным
--- CREATE INDEX в той же транзакции, CONCURRENTLY здесь не нужен.
+-- Таблица новая и пустая, CONCURRENTLY не нужен.
 CREATE INDEX trip_positions_trip_recorded_idx
     ON trip_positions (trip_id, recorded_at, id);
 
 -- +goose Down
--- Индекс удаляется вместе с таблицей.
 DROP TABLE trip_positions;

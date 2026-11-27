@@ -8,10 +8,9 @@ import (
 	"time"
 )
 
-// PushConfig — куда и с каким таймаутом ходить в Push Service (ЛР3 п. 5.5).
 type PushConfig struct {
-	URL            string        // PUSH_HTTP_URL, базовый адрес без пути, например http://localhost:23809
-	RequestTimeout time.Duration // PUSH_REQUEST_TIMEOUT: потолок на весь вызов, от соединения до тела ответа
+	URL            string        // PUSH_HTTP_URL
+	RequestTimeout time.Duration // PUSH_REQUEST_TIMEOUT
 }
 
 func loadPush() (PushConfig, error) {

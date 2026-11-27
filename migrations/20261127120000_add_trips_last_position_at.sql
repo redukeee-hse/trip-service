@@ -1,6 +1,5 @@
 -- +goose Up
--- NULL означает «координат по поездке ещё не было»: в этом случае выборка
--- для опроса отсчитывает время от started_at.
+-- NULL — координат ещё не было.
 ALTER TABLE trips ADD COLUMN last_position_at TIMESTAMPTZ;
 
 -- +goose Down

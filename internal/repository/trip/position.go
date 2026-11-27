@@ -11,8 +11,7 @@ import (
 	"github.com/redukeee-hse/avitoService/internal/domain/trip"
 )
 
-// AddPosition сохраняет точку маршрута и возвращает её с id из БД.
-// Вызывается внутри транзакции use case, после блокировки строки поездки.
+// AddPosition сохраняет точку и возвращает её с id из БД.
 func (r *Repository) AddPosition(ctx context.Context, p trip.Position) (trip.Position, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()
@@ -33,11 +32,8 @@ func (r *Repository) AddPosition(ctx context.Context, p trip.Position) (trip.Pos
 	return p, nil
 }
 
-// TouchLastPosition сдвигает trips.last_position_at вперёд до at.
-//
-// Значение только растёт: опоздавшая точка (at раньше уже записанного)
-// строку не меняет. Сравнение — в самом SQL, а не в Go: так проверка и
-// запись атомарны. Ноль обновлённых строк — нормальный исход, не ошибка.
+// TouchLastPosition сдвигает last_position_at только вперёд: сравнение в
+// самом UPDATE, опоздавшая точка строку не меняет.
 func (r *Repository) TouchLastPosition(ctx context.Context, tripID uuid.UUID, at time.Time) error {
 	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()

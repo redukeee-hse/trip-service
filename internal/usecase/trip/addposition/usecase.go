@@ -21,18 +21,13 @@ func New(tx txManager, repo tripRepository, now func() time.Time) *Usecase {
 	return &Usecase{tx: tx, repo: repo, now: now}
 }
 
-// Execute сохраняет точку и сдвигает last_position_at поездки.
-//
-// Ошибки: *trip.ValidationError (400), trip.ErrTripNotFound (404),
-// trip.ErrTripCompleted (409), остальное — 500.
+// Execute сохраняет точку и сдвигает last_position_at в одной транзакции.
 func (u *Usecase) Execute(
 	ctx context.Context,
 	tripID uuid.UUID,
 	coords trip.Coordinates,
 	recordedAt time.Time,
 ) (trip.Position, error) {
-	// Валидация до транзакции: на заведомо плохой запрос не берём соединение
-	// и не блокируем строку поездки.
 	pos, err := trip.NewPosition(tripID, coords, recordedAt, u.now())
 	if err != nil {
 		return trip.Position{}, fmt.Errorf("add position to trip %s: %w", tripID, err)

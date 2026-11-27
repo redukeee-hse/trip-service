@@ -18,8 +18,7 @@ func New(repo tripRepository) *Usecase {
 	return &Usecase{repo: repo}
 }
 
-// Execute возвращает точки маршрута. Ошибки: trip.ErrTripNotFound (404),
-// остальное — 500. Поездка без точек — пустой список и 200.
+// Execute возвращает точки маршрута; для несуществующей поездки — ErrTripNotFound.
 func (u *Usecase) Execute(ctx context.Context, tripID uuid.UUID) ([]trip.Position, error) {
 	_, err := u.repo.GetByID(ctx, tripID)
 	if err != nil {
