@@ -21,6 +21,7 @@ type Config struct {
 	DB                DBConfig
 	Telemetry         TelemetryConfig
 	Push              PushConfig
+	Positions         PositionsConfig
 }
 
 type DBConfig struct {
@@ -146,6 +147,11 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	positions, err := loadPositions()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Addr:              addr,
 		LogLvl:            logLvl,
@@ -157,6 +163,7 @@ func LoadConfig() (Config, error) {
 		PingTimeout:       pingTimeout,
 		Telemetry:         telemetry,
 		Push:              push,
+		Positions:         positions,
 		DB: DBConfig{
 			URL:             url,
 			MaxConns:        maxConns,
