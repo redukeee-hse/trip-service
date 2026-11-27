@@ -109,3 +109,57 @@ func TestTouchLastPosition_UnknownTrip(t *testing.T) {
 		t.Errorf("err = %v, want nil", err)
 	}
 }
+
+// Маршрут по recorded_at, при равенстве — по id. Точки вставлены не по
+// порядку (как приходит офлайн-пачка): без ORDER BY Postgres вернул бы их
+// в порядке вставки, и тест бы упал.
+func TestListPositions_Order(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo, _ := setup(t)
+
+	tr := newTrip(t, uuid.New())
+	if err := repo.Create(ctx, tr); err != nil {
+		t.Fatalf("create trip: %v", err)
+	}
+
+	t1201 := time.Date(2026, 11, 27, 12, 1, 0, 0, time.UTC)
+	t1205 := time.Date(2026, 11, 27, 12, 5, 0, 0, time.UTC)
+	add := func(at time.Time, lat float64) int64 {
+		p, err := repo.AddPosition(ctx, trip.Position{TripID: tr.ID, Coordinates: trip.Coordinates{Latitude: lat}, RecordedAt: at})
+		if err != nil {
+			t.Fatalf("AddPosition: %v", err)
+		}
+		return p.ID
+	}
+	late := add(t1205, 1)
+	tieA := add(t1201, 2)
+	tieB := add(t1201, 3)
+
+	got, err := repo.ListPositions(ctx, tr.ID)
+	if err != nil {
+		t.Fatalf("ListPositions: %v", err)
+	}
+	ids := make([]int64, 0, len(got))
+	for _, p := range got {
+		ids = append(ids, p.ID)
+	}
+	want := []int64{tieA, tieB, late}
+	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] || ids[2] != want[2] {
+		t.Fatalf("ids = %v, want %v (recorded_at, затем id)", ids, want)
+	}
+	if got[0].TripID != tr.ID || got[0].Coordinates.Latitude != 2 || !got[0].RecordedAt.Equal(t1201) {
+		t.Errorf("первая точка %+v: поля прочитаны неверно", got[0])
+	}
+}
+
+// Поездка без точек — пустой срез, не nil и не ошибка.
+func TestListPositions_Empty(t *testing.T) {
+	t.Parallel()
+	repo, _ := setup(t)
+
+	got, err := repo.ListPositions(context.Background(), uuid.New())
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("got %v, err %v; want пустой срез без ошибки", got, err)
+	}
+}

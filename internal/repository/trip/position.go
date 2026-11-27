@@ -61,3 +61,43 @@ func (r *Repository) TouchLastPosition(ctx context.Context, tripID uuid.UUID, at
 	}
 	return nil
 }
+
+// ListPositions возвращает маршрут поездки: все точки по возрастанию
+// recorded_at, при равенстве — по id. Пустой маршрут — пустой срез, не ошибка.
+// Существование поездки здесь не проверяется — это делает use case.
+func (r *Repository) ListPositions(ctx context.Context, tripID uuid.UUID) ([]trip.Position, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	query, args, err := r.sb.
+		Select("id", "trip_id", "latitude", "longitude", "recorded_at").
+		From("trip_positions").
+		Where(sq.Eq{"trip_id": tripID}).
+		OrderBy("recorded_at ASC", "id ASC").
+		ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("build select positions query: %w", err)
+	}
+
+	rows, err := r.db.Executor(ctx).Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("select positions: %w", err)
+	}
+	defer rows.Close()
+
+	positions := make([]trip.Position, 0)
+	for rows.Next() {
+		var p trip.Position
+		if err := rows.Scan(&p.ID, &p.TripID, &p.Coordinates.Latitude, &p.Coordinates.Longitude, &p.RecordedAt); err != nil {
+			return nil, fmt.Errorf("scan position: %w", err)
+		}
+		p.RecordedAt = p.RecordedAt.UTC()
+		positions = append(positions, p)
+	}
+	// Ошибка могла случиться посреди чтения (обрыв соединения, таймаут):
+	// rows.Next() вернёт false, и без этой проверки мы отдали бы обрезанный маршрут.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read positions: %w", err)
+	}
+	return positions, nil
+}

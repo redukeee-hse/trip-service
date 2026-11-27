@@ -14,10 +14,11 @@ import (
 type Usecase struct {
 	tx   txManager
 	repo tripRepository
+	now  func() time.Time
 }
 
-func New(tx txManager, repo tripRepository) *Usecase {
-	return &Usecase{tx: tx, repo: repo}
+func New(tx txManager, repo tripRepository, now func() time.Time) *Usecase {
+	return &Usecase{tx: tx, repo: repo, now: now}
 }
 
 // Execute сохраняет точку и сдвигает last_position_at поездки.
@@ -32,7 +33,7 @@ func (u *Usecase) Execute(
 ) (trip.Position, error) {
 	// Валидация до транзакции: на заведомо плохой запрос не берём соединение
 	// и не блокируем строку поездки.
-	pos, err := trip.NewPosition(tripID, coords, recordedAt)
+	pos, err := trip.NewPosition(tripID, coords, recordedAt, u.now())
 	if err != nil {
 		return trip.Position{}, fmt.Errorf("add position to trip %s: %w", tripID, err)
 	}

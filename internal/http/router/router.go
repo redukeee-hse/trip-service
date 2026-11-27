@@ -17,17 +17,19 @@ import (
 	"github.com/redukeee-hse/avitoService/internal/http/trip/create"
 	"github.com/redukeee-hse/avitoService/internal/http/trip/finish"
 	"github.com/redukeee-hse/avitoService/internal/http/trip/get"
+	"github.com/redukeee-hse/avitoService/internal/http/trip/listpositions"
 )
 
 // Handlers — ручки, которые собирает container. Структура вместо пяти
 // позиционных параметров: при новой ручке не надо переставлять аргументы,
 // а имена полей не затеняют имена пакетов create/get/finish.
 type Handlers struct {
-	Create      *create.Handler
-	Get         *get.Handler
-	Finish      *finish.Handler
-	AddPosition *addposition.Handler
-	Health      *health.Handler
+	Create        *create.Handler
+	Get           *get.Handler
+	Finish        *finish.Handler
+	AddPosition   *addposition.Handler
+	ListPositions *listpositions.Handler
+	Health        *health.Handler
 }
 
 type server struct {
@@ -71,6 +73,10 @@ func (s *server) FinishTrip(w http.ResponseWriter, r *http.Request, tripID api.T
 
 func (s *server) CreateTripPosition(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
 	s.h.AddPosition.Handle(w, r, tripID)
+}
+
+func (s *server) ListTripPositions(w http.ResponseWriter, r *http.Request, tripID api.TripId) {
+	s.h.ListPositions.Handle(w, r, tripID)
 }
 
 func (s *server) Health(w http.ResponseWriter, r *http.Request) {

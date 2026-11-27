@@ -18,6 +18,9 @@ var (
 	recordedAt = time.Date(2026, 11, 27, 10, 5, 0, 0, time.UTC)
 )
 
+// fixedNow — «сейчас» в часах usecase: на 10 секунд позже recordedAt.
+func fixedNow() time.Time { return recordedAt.Add(10 * time.Second) }
+
 // runInTx — мок txManager, который честно выполняет fn, как настоящая транзакция.
 func runInTx(tx *MocktxManager) {
 	tx.EXPECT().
@@ -53,7 +56,7 @@ func TestExecute_Success(t *testing.T) {
 		repo.EXPECT().TouchLastPosition(gomock.Any(), id, recordedAt).Return(nil),
 	)
 
-	got, err := addposition.New(tx, repo).Execute(context.Background(), id, coords, recordedAt)
+	got, err := addposition.New(tx, repo, fixedNow).Execute(context.Background(), id, coords, recordedAt)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -71,12 +74,27 @@ func TestExecute_InvalidPosition_NoTx(t *testing.T) {
 	repo := NewMocktripRepository(ctrl)
 	// Никаких EXPECT: любой вызов tx или repo провалит тест.
 
-	_, err := addposition.New(tx, repo).Execute(context.Background(), uuid.New(),
+	_, err := addposition.New(tx, repo, fixedNow).Execute(context.Background(), uuid.New(),
 		trip.Coordinates{Latitude: 91, Longitude: 0}, recordedAt)
 
 	var vErr *trip.ValidationError
 	if !errors.As(err, &vErr) {
 		t.Fatalf("err = %v, want *ValidationError", err)
+	}
+}
+
+// «Сейчас» берётся из часов usecase, а не из time.Now(): точка на 2 минуты
+// впереди fixedNow отвергается до транзакции.
+func TestExecute_FuturePosition_NoTx(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	_, err := addposition.New(NewMocktxManager(ctrl), NewMocktripRepository(ctrl), fixedNow).
+		Execute(context.Background(), uuid.New(), coords, fixedNow().Add(2*time.Minute))
+
+	var vErr *trip.ValidationError
+	if !errors.As(err, &vErr) || vErr.Field != "recorded_at" {
+		t.Fatalf("err = %v, want *ValidationError по recorded_at", err)
 	}
 }
 
@@ -140,7 +158,7 @@ func TestExecute_Errors(t *testing.T) {
 			runInTx(tx)
 			tt.setup(repo, id)
 
-			got, err := addposition.New(tx, repo).Execute(context.Background(), id, coords, recordedAt)
+			got, err := addposition.New(tx, repo, fixedNow).Execute(context.Background(), id, coords, recordedAt)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want errors.Is %v", err, tt.want)
 			}

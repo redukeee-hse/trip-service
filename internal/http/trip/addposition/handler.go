@@ -12,6 +12,7 @@ import (
 	api "github.com/redukeee-hse/avitoService/internal/generated"
 	"github.com/redukeee-hse/avitoService/internal/http/requestbody"
 	"github.com/redukeee-hse/avitoService/internal/http/response"
+	"github.com/redukeee-hse/avitoService/internal/http/trip/tripapi"
 )
 
 type Handler struct {
@@ -48,7 +49,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request, tripID api.Trip
 		response.Error(w, r, err)
 		return
 	}
-	response.JSON(w, http.StatusCreated, toAPI(p))
+	response.JSON(w, http.StatusCreated, tripapi.PositionFromDomain(p))
 }
 
 func checkRequiredFields(body []byte) error {
@@ -60,13 +61,4 @@ func checkRequiredFields(body []byte) error {
 		return fmt.Errorf("coordinates: %w", err)
 	}
 	return nil
-}
-
-func toAPI(p trip.Position) api.TripPosition {
-	return api.TripPosition{
-		Id:          p.ID,
-		TripId:      p.TripID,
-		Coordinates: api.Coordinates{Latitude: p.Coordinates.Latitude, Longitude: p.Coordinates.Longitude},
-		RecordedAt:  p.RecordedAt,
-	}
 }

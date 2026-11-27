@@ -17,14 +17,25 @@ type Position struct {
 	RecordedAt  time.Time
 }
 
-// NewPosition создаёт новую точку маршрута. Если координаты вне диапазона
-// или время фиксации не задано, возвращается *ValidationError (HTTP 400).
-func NewPosition(tripID uuid.UUID, coords Coordinates, recordedAt time.Time) (Position, error) {
+// MaxRecordedAtSkew — насколько recorded_at может опережать часы сервера.
+// Часы телефона и сервера расходятся, поэтому небольшой запас допустим;
+// точка «из будущего» сверх него — ошибка клиента (ТЗ ЛР3, п. 4.1).
+const MaxRecordedAtSkew = time.Minute
+
+// NewPosition создаёт новую точку маршрута. now — текущее время сервиса:
+// домен не зовёт time.Now() сам, чтобы правило проверялось тестом.
+// Если координаты вне диапазона, время фиксации не задано или опережает
+// now больше чем на MaxRecordedAtSkew, возвращается *ValidationError (HTTP 400).
+func NewPosition(tripID uuid.UUID, coords Coordinates, recordedAt, now time.Time) (Position, error) {
 	if err := coords.validate("coordinates"); err != nil {
 		return Position{}, err
 	}
 	if recordedAt.IsZero() {
 		return Position{}, &ValidationError{Field: "recorded_at", Reason: "is required"}
+	}
+
+	if recordedAt.Sub(now) > MaxRecordedAtSkew {
+		return Position{}, &ValidationError{Field: "recorded_at", Reason: "must not be in the future"}
 	}
 	recordedAt = recordedAt.UTC().Truncate(time.Microsecond)
 

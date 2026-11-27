@@ -20,7 +20,7 @@ func TestNewPosition(t *testing.T) {
 	recordedAt := time.Date(2026, 11, 27, 13, 5, 0, 123456789, time.FixedZone("MSK", 3*60*60))
 	want := time.Date(2026, 11, 27, 10, 5, 0, 123456000, time.UTC)
 
-	p, err := trip.NewPosition(tripID, coords, recordedAt)
+	p, err := trip.NewPosition(tripID, coords, recordedAt, recordedAt)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -49,12 +49,13 @@ func TestNewPosition_Invalid(t *testing.T) {
 		{"долгота > 180", trip.Coordinates{Latitude: 0, Longitude: 180.0001}, at, "coordinates.longitude"},
 		{"долгота < -180", trip.Coordinates{Latitude: 0, Longitude: -180.0001}, at, "coordinates.longitude"},
 		{"нет recorded_at", ok, time.Time{}, "recorded_at"},
+		{"из будущего больше чем на минуту", ok, at.Add(trip.MaxRecordedAtSkew + time.Microsecond), "recorded_at"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := trip.NewPosition(uuid.New(), tt.coords, tt.at)
+			_, err := trip.NewPosition(uuid.New(), tt.coords, tt.at, at)
 			var vErr *trip.ValidationError
 			if !errors.As(err, &vErr) {
 				t.Fatalf("err = %v, want *ValidationError", err)
@@ -75,7 +76,7 @@ func TestNewPosition_Bounds(t *testing.T) {
 		{Latitude: 90, Longitude: 180},
 		{Latitude: -90, Longitude: -180},
 	} {
-		if _, err := trip.NewPosition(uuid.New(), c, at); err != nil {
+		if _, err := trip.NewPosition(uuid.New(), c, at, at); err != nil {
 			t.Errorf("NewPosition(%+v) err = %v, want nil", c, err)
 		}
 	}
@@ -91,5 +92,24 @@ func TestTrip_EnsureActive(t *testing.T) {
 	completed := trip.Trip{Status: trip.StatusCompleted}
 	if err := completed.EnsureActive(); !errors.Is(err, trip.ErrTripCompleted) {
 		t.Errorf("completed: err = %v, want ErrTripCompleted", err)
+	}
+}
+
+// Часы телефона могут спешить: до минуты вперёд — валидно, включая границу.
+// Прошлое не ограничено — офлайн-пачка может прийти через час.
+func TestNewPosition_ClockSkew(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	ok := trip.Coordinates{Latitude: 1, Longitude: 2}
+	for name, at := range map[string]time.Time{
+		"ровно now":          now,
+		"now + 30s":          now.Add(30 * time.Second),
+		"граница now + 1m":   now.Add(trip.MaxRecordedAtSkew),
+		"час назад (офлайн)": now.Add(-time.Hour),
+	} {
+		if _, err := trip.NewPosition(uuid.New(), ok, at, now); err != nil {
+			t.Errorf("%s: err = %v, want nil", name, err)
+		}
 	}
 }

@@ -1,5 +1,5 @@
-// Package tripapi переводит доменную поездку в тело ответа API.
-// Общий для ручек create, get и finish: все три отдают api.Trip.
+// Package tripapi переводит доменную поездку и её точки в тело ответа API.
+// Общий для ручек: create, get и finish отдают api.Trip, ручки координат — api.TripPosition.
 package tripapi
 
 import (
@@ -18,5 +18,16 @@ func FromDomain(t trip.Trip) api.Trip {
 		Status:     api.TripStatus(t.Status),
 		StartedAt:  t.StartedAt,
 		FinishedAt: t.FinishedAt,
+	}
+}
+
+// PositionFromDomain — точка маршрута в теле ответа. Общий для ручек
+// сохранения точки и получения маршрута.
+func PositionFromDomain(p trip.Position) api.TripPosition {
+	return api.TripPosition{
+		Id:          p.ID,
+		TripId:      p.TripID,
+		Coordinates: api.Coordinates{Latitude: p.Coordinates.Latitude, Longitude: p.Coordinates.Longitude},
+		RecordedAt:  p.RecordedAt,
 	}
 }

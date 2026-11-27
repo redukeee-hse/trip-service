@@ -23,6 +23,7 @@ import (
 	createhttp "github.com/redukeee-hse/avitoService/internal/http/trip/create"
 	finishhttp "github.com/redukeee-hse/avitoService/internal/http/trip/finish"
 	gethttp "github.com/redukeee-hse/avitoService/internal/http/trip/get"
+	listpositionshttp "github.com/redukeee-hse/avitoService/internal/http/trip/listpositions"
 	"github.com/redukeee-hse/avitoService/internal/infra/postgres"
 	"github.com/redukeee-hse/avitoService/internal/infra/postgres/transaction"
 	"github.com/redukeee-hse/avitoService/internal/infra/telemetry"
@@ -31,6 +32,7 @@ import (
 	createuc "github.com/redukeee-hse/avitoService/internal/usecase/trip/create"
 	finishuc "github.com/redukeee-hse/avitoService/internal/usecase/trip/finish"
 	getuc "github.com/redukeee-hse/avitoService/internal/usecase/trip/get"
+	listpositionsuc "github.com/redukeee-hse/avitoService/internal/usecase/trip/listpositions"
 )
 
 // Container — то, что нужно main: что запустить, чем логировать и что
@@ -90,15 +92,17 @@ func New(ctx context.Context, cfg config.Config) (c *Container, err error) {
 	createTrip := createuc.New(txManager, trips, trips, now, tripMetrics, logger)
 	getTrip := getuc.New(trips)
 	finishTrip := finishuc.New(txManager, trips, now, tripMetrics, logger)
-	addPosition := addpositionuc.New(txManager, trips)
+	addPosition := addpositionuc.New(txManager, trips, now)
+	listPositions := listpositionsuc.New(trips)
 
 	// http
 	routes := router.New(router.Handlers{
-		Create:      createhttp.New(createTrip),
-		Get:         gethttp.New(getTrip),
-		Finish:      finishhttp.New(finishTrip),
-		AddPosition: addpositionhttp.New(addPosition),
-		Health:      health.New(pool, cfg.PingTimeout),
+		Create:        createhttp.New(createTrip),
+		Get:           gethttp.New(getTrip),
+		Finish:        finishhttp.New(finishTrip),
+		AddPosition:   addpositionhttp.New(addPosition),
+		ListPositions: listpositionshttp.New(listPositions),
+		Health:        health.New(pool, cfg.PingTimeout),
 	})
 
 	metrics, err := middleware.Metrics(providers.Meter, routes)
