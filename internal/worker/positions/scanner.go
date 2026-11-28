@@ -7,11 +7,14 @@ import (
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/redukeee-hse/avitoService/internal/domain/trip"
 )
 
 type ScannerConfig struct {
 	Interval   time.Duration
 	StaleAfter time.Duration
+	BatchSize  uint64 // строк в одной порции выборки
 }
 
 // Scanner на каждом тике берёт из БД молчащие поездки и ставит их в очередь.
@@ -69,25 +72,42 @@ func (s *Scanner) Run(ctx context.Context) {
 	}
 }
 
-// scan — один обход. Ошибка БД сканер не останавливает.
+// scan читает порции, пока они не кончатся или очередь не откажет.
 func (s *Scanner) scan(ctx context.Context) {
 	ctx, span := s.tracer.Start(ctx, "positions.scan")
 	defer span.End()
 
 	before := s.now().Add(-s.cfg.StaleAfter)
-	trips, err := s.repo.ListStale(ctx, before)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "list stale trips")
-		s.log.ErrorContext(ctx, "list stale trips failed", slog.Any("error", err))
-		return
-	}
-	for _, tr := range trips {
-		res := s.queue.Enqueue(Task{Trip: tr, Origin: span.SpanContext()})
-		s.metrics.StaleCheck(ctx, string(res))
-		if res == Dropped {
-			s.log.WarnContext(ctx, "position request dropped: queue is full",
-				slog.String("trip_id", tr.ID.String()))
+	rowsRead := 0
+	defer func() { s.metrics.StaleRowsRead(ctx, rowsRead) }()
+
+	var after *trip.StaleCursor
+	origin := span.SpanContext()
+
+	for {
+		batch, err := s.repo.ListStale(ctx, before, after, s.cfg.BatchSize)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "list stale trips")
+			s.log.ErrorContext(ctx, "list stale trips failed", slog.Any("error", err))
+			return
 		}
+		rowsRead += len(batch)
+
+		for _, tr := range batch {
+			res := s.queue.Enqueue(Task{Trip: tr, Origin: origin})
+			s.metrics.StaleCheck(ctx, string(res))
+			if res == Dropped {
+				s.log.WarnContext(ctx, "position request dropped: queue is full",
+					slog.String("trip_id", tr.ID.String()))
+				return
+			}
+		}
+
+		if len(batch) == 0 || uint64(len(batch)) < s.cfg.BatchSize {
+			return
+		}
+		cursor := batch[len(batch)-1].Cursor()
+		after = &cursor
 	}
 }

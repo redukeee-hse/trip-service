@@ -15,10 +15,10 @@ import (
 // Обязательный тест ЛР3 п. 7.1: в выборку попадают только активные поездки,
 // молчащие дольше границы; свежие и завершённые — нет.
 //
-// Время поездок — 2000 год: другие тесты пакета параллельно создают поездки
-// с started_at = now, и граница в 2000 году их гарантированно не захватит.
+// Время поездок — 2000 год: другие тесты пакета создают поездки с
+// started_at = now, граница в 2000 году их не захватит. Не параллельный:
+// TestListStale_Keyset тоже работает со старыми датами.
 func TestListStale(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	repo, _ := setup(t)
 
@@ -52,7 +52,7 @@ func TestListStale(t *testing.T) {
 	}
 	onBoundary := create(before) // ровно на границе — ещё не устарела (строго <)
 
-	got, err := repo.ListStale(ctx, before)
+	got, err := repo.ListStale(ctx, before, nil, 100)
 	if err != nil {
 		t.Fatalf("ListStale: %v", err)
 	}
@@ -79,6 +79,56 @@ func TestListStale(t *testing.T) {
 			t.Error("в выборку попала завершённая поездка")
 		case onBoundary.ID:
 			t.Error("в выборку попала поездка ровно на границе (нужно строго <)")
+		}
+	}
+}
+
+// Keyset-продолжение: у части поездок одинаковое время, порции по 2 режут
+// их посередине. Склеенные порции должны дать ровно полную выборку — без
+// пропусков и повторов.
+func TestListStale_Keyset(t *testing.T) { // не параллельный, см. TestListStale
+	ctx := context.Background()
+	repo, _ := setup(t)
+
+	before := time.Date(2001, 1, 1, 12, 0, 0, 0, time.UTC)
+	same := before.Add(-10 * time.Minute)
+	for _, at := range []time.Time{same, same, same, same, same.Add(time.Minute), same.Add(-time.Minute)} {
+		tr := newTrip(t, uuid.New())
+		tr.StartedAt = at
+		if err := repo.Create(ctx, tr); err != nil {
+			t.Fatalf("create trip: %v", err)
+		}
+	}
+
+	all, err := repo.ListStale(ctx, before, nil, 100)
+	if err != nil {
+		t.Fatalf("ListStale: %v", err)
+	}
+	if len(all) != 6 {
+		t.Fatalf("полная выборка %d, want 6", len(all))
+	}
+
+	var paged []trip.StaleTrip
+	var after *trip.StaleCursor
+	for range 10 { // страховка от бесконечного цикла
+		page, err := repo.ListStale(ctx, before, after, 2)
+		if err != nil {
+			t.Fatalf("ListStale page: %v", err)
+		}
+		paged = append(paged, page...)
+		if len(page) < 2 {
+			break
+		}
+		c := page[len(page)-1].Cursor()
+		after = &c
+	}
+
+	if len(paged) != len(all) {
+		t.Fatalf("по порциям %d поездок, полная выборка %d: потеряли или задвоили", len(paged), len(all))
+	}
+	for i := range all {
+		if paged[i].ID != all[i].ID {
+			t.Errorf("[%d] по порциям %s, в полной выборке %s", i, paged[i].ID, all[i].ID)
 		}
 	}
 }

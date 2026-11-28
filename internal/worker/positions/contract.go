@@ -30,9 +30,10 @@ type poolMetrics interface {
 }
 
 type staleLister interface {
-	ListStale(ctx context.Context, before time.Time) ([]trip.StaleTrip, error)
+	ListStale(ctx context.Context, before time.Time, after *trip.StaleCursor, limit uint64) ([]trip.StaleTrip, error)
 }
 
 type scannerMetrics interface {
 	StaleCheck(ctx context.Context, result string)
+	StaleRowsRead(ctx context.Context, rows int) // tripgo.stale_checks.rows_read, раз за тик
 }

@@ -64,6 +64,7 @@ func TestPositionMetrics(t *testing.T) {
 	m.StaleCheck(ctx, "queued")
 	m.StaleCheck(ctx, "queued")
 	m.StaleCheck(ctx, "dropped")
+	m.StaleRowsRead(ctx, 250)
 	m.WorkerBusy(ctx)
 	m.WorkerBusy(ctx)
 	m.WorkerIdle(ctx)
@@ -96,6 +97,10 @@ func TestPositionMetrics(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("в гистограмме %d измерений, want 2: cancelled вызова не делал", count)
+	}
+	rows, ok := got["tripgo.stale_checks.rows_read"].(metricdata.Histogram[int64])
+	if !ok || rows.DataPoints[0].Count != 1 || rows.DataPoints[0].Sum != 250 {
+		t.Errorf("rows_read = %+v, want одно измерение 250", got["tripgo.stale_checks.rows_read"])
 	}
 	gauge, ok := got["tripgo.position_requests.queue.size"].(metricdata.Gauge[int64])
 	if !ok || gauge.DataPoints[0].Value != 7 {

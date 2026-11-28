@@ -14,20 +14,24 @@ import (
 // иначе индекс не применится.
 const lastSeenExpr = "COALESCE(last_position_at, started_at)"
 
-// ListStale возвращает все активные поездки, молчащие с before, самые давние
-// первыми, без LIMIT. before считается по часам сервиса, чтобы его можно было
-// подменить в тестах.
-func (r *Repository) ListStale(ctx context.Context, before time.Time) ([]trip.StaleTrip, error) {
+// ListStale возвращает порцию молчащих поездок, самые давние первыми.
+// after == nil — первая порция, иначе продолжение строго после after.
+func (r *Repository) ListStale(ctx context.Context, before time.Time, after *trip.StaleCursor, limit uint64) ([]trip.StaleTrip, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()
 
-	query, args, err := r.sb.
+	builder := r.sb.
 		Select("id", "driver_id", lastSeenExpr).
 		From("trips").
 		// Литерал, а не $1: иначе generic-план не применит частичный индекс.
-		Where(colStatus+" = '"+string(trip.StatusActive)+"'").
-		Where(sq.Lt{lastSeenExpr: before}).
+		Where(colStatus + " = '" + string(trip.StatusActive) + "'").
+		Where(sq.Lt{lastSeenExpr: before})
+	if after != nil {
+		builder = builder.Where(sq.Expr("("+lastSeenExpr+", id) > (?, ?)", after.LastSeenAt, after.ID))
+	}
+	query, args, err := builder.
 		OrderBy(lastSeenExpr, "id").
+		Limit(limit).
 		ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("build select stale trips query: %w", err)

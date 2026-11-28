@@ -13,6 +13,7 @@ import (
 type PositionMetrics struct {
 	saved         metric.Int64Counter
 	staleChecks   metric.Int64Counter
+	rowsRead      metric.Int64Histogram
 	workersActive metric.Int64UpDownCounter
 	requests      metric.Int64Counter
 	duration      metric.Float64Histogram
@@ -32,6 +33,12 @@ func NewPositionMetrics(mp metric.MeterProvider) (*PositionMetrics, error) {
 		metric.WithUnit("{trip}"),
 		metric.WithDescription("Что сканер сделал с поездкой на тике: queued, duplicate, dropped.")); err != nil {
 		return nil, fmt.Errorf("tripgo.stale_checks: %w", err)
+	}
+	if m.rowsRead, err = meter.Int64Histogram("tripgo.stale_checks.rows_read",
+		metric.WithUnit("{row}"),
+		metric.WithDescription("Сколько строк выборки сканер прочитал за тик."),
+		metric.WithExplicitBucketBoundaries(0, 10, 50, 100, 250, 500, 1000, 5000)); err != nil {
+		return nil, fmt.Errorf("tripgo.stale_checks.rows_read: %w", err)
 	}
 	if m.workersActive, err = meter.Int64UpDownCounter("tripgo.position_requests.workers.active",
 		metric.WithUnit("{worker}"),
@@ -58,6 +65,10 @@ func (m *PositionMetrics) PositionSaved(ctx context.Context) {
 
 func (m *PositionMetrics) StaleCheck(ctx context.Context, result string) {
 	m.staleChecks.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+}
+
+func (m *PositionMetrics) StaleRowsRead(ctx context.Context, rows int) {
+	m.rowsRead.Record(ctx, int64(rows))
 }
 
 func (m *PositionMetrics) WorkerBusy(ctx context.Context) {

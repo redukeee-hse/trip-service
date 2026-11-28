@@ -7,6 +7,7 @@ type PositionsConfig struct {
 	StaleAfter    time.Duration // POSITION_STALE_AFTER
 	Workers       int           // POSITION_WORKERS
 	QueueSize     int           // POSITION_QUEUE_SIZE
+	ScanBatchSize int           // POSITION_SCAN_BATCH_SIZE
 }
 
 func loadPositions() (PositionsConfig, error) {
@@ -26,10 +27,15 @@ func loadPositions() (PositionsConfig, error) {
 	if err != nil {
 		return PositionsConfig{}, err
 	}
+	scanBatchSize, err := getInt32Env("POSITION_SCAN_BATCH_SIZE", 100)
+	if err != nil {
+		return PositionsConfig{}, err
+	}
 	return PositionsConfig{
 		CheckInterval: checkInterval,
 		StaleAfter:    staleAfter,
 		Workers:       int(workers),
 		QueueSize:     int(queueSize),
+		ScanBatchSize: int(scanBatchSize),
 	}, nil
 }

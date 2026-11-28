@@ -108,6 +108,7 @@ func New(ctx context.Context, cfg config.Config) (c *Container, err error) {
 		positions.NewScanner(trips, queue, positions.ScannerConfig{
 			Interval:   cfg.Positions.CheckInterval,
 			StaleAfter: cfg.Positions.StaleAfter,
+			BatchSize:  uint64(cfg.Positions.ScanBatchSize), //nolint:gosec // > 0, проверено в config
 		}, positions.NewTimeTicker, time.Now, tracer, positionMetrics, logger),
 		queue,
 		positions.NewPool(queue, pushClient, cfg.Positions.Workers, cfg.Push.RequestTimeout,

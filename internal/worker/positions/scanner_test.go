@@ -64,12 +64,14 @@ type listReply struct {
 
 type listCall struct {
 	before time.Time
+	after  *trip.StaleCursor
+	limit  uint64
 }
 
-func (f *fakeLister) ListStale(_ context.Context, before time.Time) ([]trip.StaleTrip, error) {
+func (f *fakeLister) ListStale(_ context.Context, before time.Time, after *trip.StaleCursor, limit uint64) ([]trip.StaleTrip, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, listCall{before: before})
+	f.calls = append(f.calls, listCall{before: before, after: after, limit: limit})
 	if len(f.replies) == 0 {
 		return nil, nil
 	}
@@ -85,8 +87,21 @@ func (f *fakeLister) callList() []listCall {
 }
 
 type fakeScanMetrics struct {
-	mu     sync.Mutex
-	counts map[positions.EnqueueResult]int
+	mu       sync.Mutex
+	counts   map[positions.EnqueueResult]int
+	rowsRead []int // по одному значению на тик
+}
+
+func (m *fakeScanMetrics) StaleRowsRead(_ context.Context, rows int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rowsRead = append(m.rowsRead, rows)
+}
+
+func (m *fakeScanMetrics) rows() []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]int(nil), m.rowsRead...)
 }
 
 func (m *fakeScanMetrics) StaleCheck(_ context.Context, r string) {
@@ -126,7 +141,7 @@ func startScanner(t *testing.T, queueSize int, replies ...listReply) *scannerEnv
 	}
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(env.spans))
 	s := positions.NewScanner(env.lister, env.queue,
-		positions.ScannerConfig{Interval: 30 * time.Second, StaleAfter: time.Minute},
+		positions.ScannerConfig{Interval: 30 * time.Second, StaleAfter: time.Minute, BatchSize: 100},
 		func(d time.Duration) positions.Ticker {
 			env.ticker.interval = d
 			return env.ticker
@@ -237,8 +252,10 @@ func TestScanner_DropsWhenFull(t *testing.T) {
 	env.ticker.tick(t) // принят — значит первый обход не завис на полной очереди
 	env.stop()
 
-	if q, d := env.metrics.get(positions.Queued), env.metrics.get(positions.Dropped); q != 1 || d != 3 {
-		t.Errorf("queued=%d dropped=%d, want 1 и 3 (2 на первом тике, 1 на втором)", q, d)
+	// Первый dropped на тике останавливает обход: третья поездка первого тика
+	// даже не пробуется. Второй тик: очередь всё ещё полна — снова dropped.
+	if q, d := env.metrics.get(positions.Queued), env.metrics.get(positions.Dropped); q != 1 || d != 2 {
+		t.Errorf("queued=%d dropped=%d, want 1 и 2 (по одному dropped на тик)", q, d)
 	}
 }
 
@@ -269,7 +286,7 @@ func TestScanner_NoopTracer(t *testing.T) {
 	tk := &fakeTicker{c: make(chan time.Time)}
 	q := positions.NewQueue(10)
 	s := positions.NewScanner(&fakeLister{replies: []listReply{{trips: staleTrips(1)}}}, q,
-		positions.ScannerConfig{Interval: time.Second, StaleAfter: time.Second},
+		positions.ScannerConfig{Interval: time.Second, StaleAfter: time.Second, BatchSize: 100},
 		func(time.Duration) positions.Ticker { return tk },
 		time.Now, noop.NewTracerProvider().Tracer(""), &fakeScanMetrics{}, slog.New(slog.DiscardHandler))
 
